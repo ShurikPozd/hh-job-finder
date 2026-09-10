@@ -54,6 +54,7 @@ class Database:
                 match_threshold INTEGER DEFAULT 6,
                 search_interval_hours REAL DEFAULT 3,
                 notifications_enabled INTEGER DEFAULT 1,
+                only_accredited INTEGER DEFAULT 1,
                 onboarding_done INTEGER DEFAULT 0,
                 created_at TEXT,
                 updated_at TEXT
@@ -108,6 +109,16 @@ class Database:
             """
         )
         await self._conn.commit()
+        await self._ensure_column("users", "only_accredited",
+                                  "INTEGER NOT NULL DEFAULT 1")
+
+    async def _ensure_column(self, table: str, column: str, ddl: str):
+        cur = await self._conn.execute(f"PRAGMA table_info({table})")
+        rows = await cur.fetchall()
+        cols = {r["name"] for r in rows}
+        if column not in cols:
+            await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            await self._conn.commit()
 
     # ================= users =================
 

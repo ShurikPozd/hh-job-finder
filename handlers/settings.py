@@ -95,6 +95,11 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
         await router.obj.db.upsert_user(user_id, notifications_enabled=new_val)
         status = "🔔 Вкл" if new_val else "🔕 Выкл"
         await call.message.edit_text(f"Уведомления: {status}", reply_markup=settings_keyboard())
+    elif action == "accreditation":
+        new_val = 0 if user.get("only_accredited", 1) else 1
+        await router.obj.db.upsert_user(user_id, only_accredited=new_val)
+        status = "✅ Только с аккредитацией" if new_val else "❌ Любые (без фильтра)"
+        await call.message.edit_text(f"Фильтр аккредитации: {status}", reply_markup=settings_keyboard())
     elif action == "bank":
         await call.message.edit_text("📁 Банк профиля:", reply_markup=bank_keyboard())
     elif action == "hidden":

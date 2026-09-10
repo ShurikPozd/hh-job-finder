@@ -49,6 +49,9 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🔔 Уведомления", callback_data="set:notifications"),
+            InlineKeyboardButton(text="🎫 Только с аккредитацией", callback_data="set:accreditation"),
+        ],
+        [
             InlineKeyboardButton(text="📁 Банк профиля", callback_data="set:bank"),
         ],
         [

@@ -84,6 +84,11 @@ class VacancyService:
             rec["employer_id"] = employer_id
 
             if rec.get("score", 0) >= threshold:
+                accredited_only = user.get("only_accredited", 1)
+                if accredited_only and not rec.get("accredited_it"):
+                    await self.db.mark_seen(user_id, vid, "seen")
+                    log.info("Фильтр: %s отброшена (нет аккредитации)", vid)
+                    continue
                 await self.db.upsert_vacancy(rec)
                 await self.db.mark_seen(user_id, vid, "seen")
                 if not silent and user.get("notifications_enabled", 1):
