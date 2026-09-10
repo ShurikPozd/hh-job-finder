@@ -1,0 +1,11 @@
+aiogram>=3.10
+aiohttp>=3.10
+aiosqlite>=0.20
+requests>=2.31
+python-dotenv>=1.0
+groq>=0.11
+apscheduler>=3.10
+python-docx>=1.1
+PyMuPDF>=1.24
+beautifulsoup4>=4.12
+lxml>=5.2
