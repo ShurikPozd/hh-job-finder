@@ -109,6 +109,11 @@ async def onb_resume(message: Message, state: FSMContext):
     if len(text) < 50:
         await message.answer("Файл пуст или не распознан. Попробуй другой формат (.txt лучше).")
         return
+    printable = sum(1 for c in text if c.isprintable())
+    if printable / max(len(text), 1) < 0.6:
+        await message.answer("Не удалось прочитать файл (похоже на бинарный формат). "
+                             "Сохрани как .txt или .docx и попробуй ещё раз.")
+        return
 
     await message.answer("🤖 Обрабатываю резюме… (может занять ~20 сек)")
     profile = await router.obj.analyzer.parse_resume(text)

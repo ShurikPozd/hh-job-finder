@@ -45,7 +45,7 @@ GROQ_CALL_GAP_SEC = 25.0  # ~25с между вызовами: ~2-3 шт/мин,
 
 
 async def _post_groq(system: str, user: str, temperature: float = 0.3,
-                     retries: int = 5) -> str:
+                     retries: int = 5, max_tokens: int | None = None) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {config.GROQ_API_KEY}",
@@ -61,7 +61,7 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
             {"role": "user", "content": user},
         ],
         "temperature": temperature,
-        "max_tokens": config.GROQ_MAX_TOKENS,
+        "max_tokens": max_tokens or config.GROQ_MAX_TOKENS,
         "reasoning_effort": "none",
     }
     async with _groq_lock:
@@ -96,7 +96,9 @@ def _extract_json(text: str) -> dict:
     candidates = list(re.finditer(r"\{", text))
     for m in reversed(candidates):
         try:
-            return json.loads(text[m.start():])
+            data, _ = json.JSONDecoder().raw_decode(text[m.start():])
+            if isinstance(data, dict):
+                return data
         except Exception:
             continue
     raise ValueError("JSON не найден в ответе модели")
@@ -217,7 +219,7 @@ class Analyzer:
             "Опыт указывай с округлением, например 1.5."
         )
         try:
-            out = await _post_groq(system, text[:12000])
+            out = await _post_groq(system, text[:12000], max_tokens=2200)
             data = _extract_json(out)
             skills = data.get("skills", [])
             if isinstance(skills, str):
