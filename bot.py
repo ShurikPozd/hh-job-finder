@@ -33,6 +33,15 @@ class App:
         self._search_locks: dict[int, asyncio.Lock] = {}
         self.analyzer = None
 
+    def backup_now(self):
+        """Пуш бэкапа сразу (например после онбординга), отложенно."""
+        async def go():
+            try:
+                await cloud_backup.push_backup(self.db)
+            except Exception as e:
+                log.warning("backup_now: %s", e)
+        asyncio.create_task(go())
+
     async def maybe_try_search(self, user_id: int):
         """Первый поиск сразу после онбординга (отложенно)."""
         async def go():

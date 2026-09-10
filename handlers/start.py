@@ -87,6 +87,7 @@ async def _finish(msg, user_id, profile: dict, state: FSMContext):
         "— сопроводительные станут точнее."
     )
     await router.obj.maybe_try_search(user_id)
+    router.obj.backup_now()
 
 
 @router.message(Onboarding.waiting_resume)
