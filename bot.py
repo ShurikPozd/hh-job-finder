@@ -9,6 +9,7 @@ from aiogram.types import Message
 from aiohttp import web
 
 import config
+import cloud_backup
 from db import Database
 from service import VacancyService
 
@@ -74,6 +75,20 @@ class App:
         from scheduler import start_scheduler
         await start_scheduler(self.db, self.service)
 
+        await self._restore_or_backup()
+
+    async def _restore_or_backup(self):
+        """Эфемерный диск Render: если БД пуста — восстановить из GitHub из бэкапа.
+        Если есть данные, но бэкапа ещё нет — сделать первый push."""
+        import cloud_backup as cb
+        users = await self.db.all_users()
+        if not users:
+            res = await cb.restore_from_github(self.db)
+            if res.get("users"):
+                log.info("БД восстановлена из бэкапа: %s", res)
+        else:
+            asyncio.create_task(cb.push_backup(self.db))
+
     async def shutdown(self):
         if self.bot:
             await self.bot.session.close()
@@ -121,10 +136,18 @@ def _http_app():
 
 async def main():
     await app.startup()
-    await asyncio.gather(
-        app.dispatcher.start_polling(app.bot),
-        http_main(),
-    )
+    backup_task = asyncio.create_task(cloud_backup.backup_loop(app.db))
+    try:
+        await asyncio.gather(
+            app.dispatcher.start_polling(app.bot),
+            http_main(),
+        )
+    finally:
+        backup_task.cancel()
+        try:
+            await backup_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":

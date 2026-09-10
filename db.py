@@ -333,3 +333,38 @@ class Database:
             (inn, company_name, 1 if accredited else 0, utcnow()),
         )
         await self._conn.commit()
+
+    # ================= Бэкап =================
+
+    TABLES = ("users", "vacancies", "seen_vacancies", "hidden_employers", "registry_cache")
+
+    async def export_json(self) -> dict:
+        """Полный дамп всех таблиц для облачного бэкапа."""
+        out = {"version": 1, "tables": {}}
+        for table in self.TABLES:
+            cur = await self._conn.execute(f"SELECT * FROM {table}")
+            rows = await cur.fetchall()
+            out["tables"][table] = [dict(r) for r in rows]
+        return out
+
+    async def import_json(self, data: dict) -> int:
+        """Импорт дампа. Восстанавливает только если целевые таблицы пусты."""
+        tables = (data or {}).get("tables") or {}
+        restored = 0
+        for table, rows in tables.items():
+            if table not in self.TABLES or not isinstance(rows, list) or not rows:
+                continue
+            cur = await self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+            cnt = (await cur.fetchone())[0]
+            if cnt > 0:
+                continue
+            cols = list(rows[0].keys())
+            marks = ", ".join("?" * len(cols))
+            for r in rows:
+                await self._conn.execute(
+                    f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({marks})",
+                    tuple(r.get(c) for c in cols),
+                )
+                restored += 1
+        await self._conn.commit()
+        return restored

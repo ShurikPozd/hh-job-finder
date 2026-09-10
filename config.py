@@ -64,3 +64,11 @@ GROQ_PROXY = os.getenv("GROQ_PROXY", "").strip() or None
 HH_CONCURRENCY = int(os.getenv("HH_CONCURRENCY") or 3)
 # Задержка между запросами к hh.ru (сек), чтобы не ловить 429
 HH_RATE_LIMIT_DELAY = float(os.getenv("HH_RATE_LIMIT_DELAY") or 0.3)
+
+# ===== Облачный бэкап (Render free: эфемерный диск) =====
+# Настройки как в tg-saver-bot-cloud: дамп БД в GitHub через Git Data API
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip() or None
+GITHUB_REPO = os.getenv("GITHUB_REPO", "ShurikPozd/hh-job-finder-backups").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
+GITHUB_PATH = os.getenv("GITHUB_PATH", "backups").strip().strip("/")
+BACKUP_INTERVAL_HOURS = float(os.getenv("BACKUP_INTERVAL_HOURS") or 4)
