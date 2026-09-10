@@ -5,7 +5,7 @@ import sys
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.types import Message, Update
+from aiogram.types import Message
 from aiohttp import web
 
 import config
@@ -122,9 +122,7 @@ def _http_app():
 async def main():
     await app.startup()
     await asyncio.gather(
-        app.dispatcher.start_polling(
-            app.bot, allowed_updates=Update.get_update_types()
-        ),
+        app.dispatcher.start_polling(app.bot),
         http_main(),
     )
 
