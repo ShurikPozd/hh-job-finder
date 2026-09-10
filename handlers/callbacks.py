@@ -192,10 +192,17 @@ async def cb_bank(call: CallbackQuery, state: FSMContext):
         user = await router.obj.db.get_user(user_id)
         bank = user.get("profile_bank")
         if bank:
-            await call.message.edit_text(
-                f"📁 Ваш банк профиля (первые 3000 символов):\n\n{bank[:3000]}",
-                reply_markup=bank_keyboard(),
-            )
+            header = "📁 Ваш банк профиля:\n\n"
+            # Telegram лимит 4096 символов на сообщение — шлём частями
+            body = bank
+            chunks = [header + body[i:i + 3800] for i in range(0, len(body), 3800)]
+            chunks[0] = header + body[:3800]
+            for i, chunk in enumerate(chunks):
+                kb = bank_keyboard() if i == len(chunks) - 1 else None
+                if i == 0:
+                    await call.message.edit_text(chunk, reply_markup=kb)
+                else:
+                    await call.message.answer(chunk, reply_markup=kb)
         else:
             await call.message.edit_text("Банк не загружен. Сгенерируй или загрузи.", reply_markup=bank_keyboard())
     elif action == "delete":

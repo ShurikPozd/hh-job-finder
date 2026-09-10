@@ -219,7 +219,7 @@ class Analyzer:
             "Опыт указывай с округлением, например 1.5."
         )
         try:
-            out = await _post_groq(system, text[:12000], max_tokens=2200)
+            out = await _post_groq(system, text[:16000], max_tokens=2200)
             data = _extract_json(out)
             skills = data.get("skills", [])
             if isinstance(skills, str):
