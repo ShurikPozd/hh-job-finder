@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import logging.handlers
 import sys
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -13,9 +15,19 @@ import cloud_backup
 from db import Database
 from service import VacancyService
 
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+_handlers: list[logging.Handler] = [
+    logging.handlers.RotatingFileHandler(
+        LOG_DIR / "bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+]
+if sys.stderr:  # под pythonw (скрытый запуск) консоли нет
+    _handlers.append(logging.StreamHandler())
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=_handlers,
 )
 log = logging.getLogger("bot")
 

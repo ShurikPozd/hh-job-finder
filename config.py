@@ -9,7 +9,14 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0) or None
 
 # ===== Groq (LLM) =====
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
+def _normalize_groq_model(name: str) -> str:
+    # id qwen/qwen3.6-27b на Groq не существует (404), на аккаунте — qwen/qwen3.8-27b
+    if "qwen3.6" in name:
+        return name.replace("qwen3.6", "qwen3.8")
+    return name
+
+
+GROQ_MODEL = _normalize_groq_model(os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"))
 GROQ_TIMEOUT_SEC = int(os.getenv("GROQ_TIMEOUT_SEC") or 300)
 # Бесплатный тир Groq: ~1000 output-токенов/мин — режем max_tokens,
 # чтобы успевало несколько вызовов в минуту

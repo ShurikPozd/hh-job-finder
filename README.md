@@ -23,16 +23,22 @@ Telegram-бот поиска вакансий hh.ru для junior Python/QA ра
 ## Запуск локально
 
 ```bash
-pip install -r requirements.txt
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 copy .env.example .env   # заполнить BOT_TOKEN, OWNER_ID, GROQ_API_KEY
 python bot.py
 ```
 
-Из РФ для доступа к Telegram нужен VPN: `TG_PROXY=socks5://127.0.0.1:PORT` в `.env`.
+Для работы 24/7 без окна консоли запускай `pythonw.exe` из venv (при входе в систему —
+через Планировщик задач Windows). Логи пишутся в `logs/bot.log` (ротация 10 МБ × 5).
 
-## Деплой на Render
+Из РФ для доступа к Telegram нужен локальный SOCKS-прокси (xray и т. п.):
+`TG_PROXY=socks5://127.0.0.1:10808` в `.env`.
+
+## Деплой на Render (опционально)
 
 Web Service (Docker). Health check: `GET /healthz` на переменной `PORT`.
+Облачный бэкап БД (`GITHUB_*`) восстанавливает данные при эфемерном диске free-тарифа.
 
 ## Переменные окружения (.env)
 
@@ -41,7 +47,7 @@ Web Service (Docker). Health check: `GET /healthz` на переменной `PO
 | `BOT_TOKEN` | Telegram bot token | — |
 | `OWNER_ID` | Telegram ID владельца (доступ только ему) | — |
 | `GROQ_API_KEY` | Ключ Groq для LLM | — |
-| `GROQ_MODEL` | Модель Groq | `qwen/qwen3.6-27b` |
+| `GROQ_MODEL` | Модель Groq | `qwen/qwen3.8-27b` |
 | `GROQ_MAX_TOKENS` | Лимит токенов ответа LLM (бюджет OTPM) | `600` |
 | `DB_PATH` | Путь к SQLite | `data/hh_job_finder.db` |
 | `HH_DEFAULT_KEYWORDS` | Дефолтные ключевые слова | `python developer,junior python,q...` |
@@ -51,8 +57,10 @@ Web Service (Docker). Health check: `GET /healthz` на переменной `PO
 | `HH_PERIOD` | Глубина поиска, дней | `14` |
 | `DEFAULT_MATCH_THRESHOLD` | Порог соответствия | `6` |
 | `DEFAULT_SEARCH_INTERVAL_HOURS` | Интервал фонового поиска | `3` |
-| `TG_PROXY` | Прокси для Telegram (локально из РФ) | — |
-| `PORT`/`HTTP_PORT` | Порт health check (Render) | `0` |
+| `TG_PROXY` | SOCKS-прокси для Telegram (локально из РФ) | — |
+| `GROQ_PROXY` | SOCKS-прокси для Groq (локально из РФ) | — |
+| `PORT`/`HTTP_PORT` | Порт health check | `0` (локально `8081`) |
+| `GITHUB_*` | Облачный бэкап БД в GitHub (Git Data API) | `ShurikPozd/hh-job-finder-backups` |
 
 ## Структура
 
