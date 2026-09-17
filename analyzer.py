@@ -70,18 +70,32 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
         if delay > 0:
             await asyncio.sleep(delay)
         for attempt in range(1, retries + 1):
-            resp = await asyncio.to_thread(
-                requests.post, url, json=payload, headers=headers,
-                proxies=proxies, timeout=config.GROQ_TIMEOUT_SEC,
-            )
-            if resp.status_code == 429 and attempt < retries:
-                wait = min(2 ** attempt, 60)
-                log.warning("Groq 429 (попытка %s/%s), сон %ss", attempt, retries, wait)
-                await asyncio.sleep(wait)
-                continue
-            resp.raise_for_status()
-            _groq_next_call = time.monotonic() + GROQ_CALL_GAP_SEC
-            return resp.json()["choices"][0]["message"]["content"]
+            try:
+                resp = await asyncio.to_thread(
+                    requests.post, url, json=payload, headers=headers,
+                    proxies=proxies, timeout=config.GROQ_TIMEOUT_SEC,
+                )
+                resp.raise_for_status()
+                _groq_next_call = time.monotonic() + GROQ_CALL_GAP_SEC
+                return resp.json()["choices"][0]["message"]["content"]
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.ProxyError,
+                    requests.exceptions.SSLError) as e:
+                # Прокси/TLS может сброситься разово — повторяем с паузой
+                if attempt < retries:
+                    wait = min(2 ** attempt, 30)
+                    log.warning("Groq сеть (попытка %s/%s): %s, сон %ss",
+                                attempt, retries, type(e).__name__, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429 and attempt < retries:
+                    wait = min(2 ** attempt, 60)
+                    log.warning("Groq 429 (попытка %s/%s), сон %ss", attempt, retries, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
         raise RuntimeError("Groq не ответил после всех попыток")
 
 
