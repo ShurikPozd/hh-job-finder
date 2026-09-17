@@ -81,7 +81,12 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.ProxyError,
                     requests.exceptions.SSLError) as e:
-                # Прокси/TLS может сброситься разово — повторяем с паузой
+                # Прокси/TLS может сброситься разово — сначала мгновенно дублируем
+                # через curl (другой TLS-стек), затем пауза и повтор requests.
+                content = await asyncio.to_thread(_post_curl_sync, url, headers, payload)
+                if content is not None:
+                    _groq_next_call = time.monotonic() + GROQ_CALL_GAP_SEC
+                    return content
                 if attempt < retries:
                     wait = min(2 ** attempt, 30)
                     log.warning("Groq сеть (попытка %s/%s): %s, сон %ss",
@@ -97,6 +102,48 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                     continue
                 raise
         raise RuntimeError("Groq не ответил после всех попыток")
+
+
+def _post_curl_sync(url: str, headers: dict, payload: dict, timeout: int | None = None) -> str | None:
+    """Обходной путь через curl.exe и SOCKS-прокси — переживает сброс TLS/SSLEOF."""
+    import subprocess, tempfile, os as _os
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    timeout = timeout or min(config.GROQ_TIMEOUT_SEC, 45)
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with _os.fdopen(fd, "wb") as f:
+            f.write(data)
+        proxy = config.GROQ_PROXY or "socks5h://127.0.0.1:10808"
+        cmd = [
+            "curl.exe", "-s", "--proxy", proxy,
+            "-X", "POST", url,
+            "-H", f"Authorization: Bearer {config.GROQ_API_KEY}",
+            "-H", "Content-Type: application/json",
+            "--data-binary", "@" + path,
+            "--max-time", str(min(timeout, 60)),
+            "-o", "-",
+            "-w", "\n%{http_code}",
+        ]
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+        out = (r.stdout or b"").rstrip()
+        body, _, status_s = out.rpartition(b"\n")
+        status = int(status_s) if status_s.isdigit() else 0
+        if status == 200 and body:
+            return body.decode("utf-8", errors="replace")
+        if status == 429:
+            log.warning("Groq curl 429")
+        elif status:
+            log.warning("Groq curl HTTP %s, rc=%s", status, r.returncode)
+        return None
+    except Exception as e:
+        log.warning("Groq curl fallback сбой: %s", e)
+        return None
+    finally:
+        try:
+            _os.unlink(path)
+        except OSError:
+            pass
 
 
 def _extract_json(text: str) -> dict:
@@ -242,7 +289,7 @@ class Analyzer:
                 projects = data.get("projects", [])
                 if isinstance(projects, str):
                     projects = [p.strip() for p in projects.split(";") if p.strip()]
-                return {
+                profile = {
                     "name": data.get("name", ""),
                     "title": data.get("title", ""),
                     "skills": skills,
@@ -254,6 +301,11 @@ class Analyzer:
                     "about": data.get("about", ""),
                     "projects": projects,
                 }
+                # Пустой ответ модели считаем сбоем — уходим на повтор
+                if not (profile["name"] or profile["title"] or profile["skills"]
+                        or profile["about"]):
+                    raise ValueError("ответ модели пуст")
+                return profile
             except Exception as e:
                 if attempt == 1:
                     log.warning("Парсинг резюме не удался, повтор: %s", e)

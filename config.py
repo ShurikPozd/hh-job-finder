@@ -17,7 +17,7 @@ def _normalize_groq_model(name: str) -> str:
 
 
 GROQ_MODEL = _normalize_groq_model(os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"))
-GROQ_TIMEOUT_SEC = int(os.getenv("GROQ_TIMEOUT_SEC") or 300)
+GROQ_TIMEOUT_SEC = int(os.getenv("GROQ_TIMEOUT_SEC") or 45)
 # Бесплатный тир Groq: ~1000 output-токенов/мин — режем max_tokens,
 # чтобы успевало несколько вызовов в минуту
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS") or 600)
