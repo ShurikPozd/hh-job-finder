@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 import config
 from db import DEFAULT_PROFILE
 from keyboards import settings_keyboard, bank_keyboard, cancel_keyboard
-from resume_parser import parse_resume_document
+from resume_parser import parse_resume_document, pop_profile_note
 
 log = logging.getLogger("handlers.settings")
 router = Router()
@@ -147,8 +147,9 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
     elif action == "profile_edit":
         await state.set_state(SettingsFSM.enter_profile_text)
         await call.message.edit_text(
-            "Опиши профиль текстом (как при /start). Например: "
-            "«Начинающий Python-разработчик, Python, Django, SQL, опыт 1 год, Москва, 80к»",
+            "Опиши профиль текстом (как при /start) — можно кратко: "
+            "«Начинающий Python-разработчик, Python, Django, SQL, опыт 1 год, Москва, 80к» "
+            "— или вставь текст резюме (до 4096 символов). Для полного резюме лучше файл.",
             reply_markup=cancel_keyboard(),
         )
     await call.answer()
@@ -245,25 +246,28 @@ async def fsm_interval(message: Message, state: FSMContext):
 @router.message(SettingsFSM.enter_profile_text)
 async def fsm_profile(message: Message, state: FSMContext):
     profile = await router.obj.analyzer.parse_resume(message.text)
+    note = None
     if not profile:
         profile = DEFAULT_PROFILE.copy()
         profile["about"] = message.text
-        await message.answer(
-            "⚠️ Не удалось распознать структуру — сохранил как текст. "
-            "Лучше загрузи файл резюме (📄 Загрузить файл)."
-        )
+        note = ("⚠️ Не удалось распознать структуру — сохранил текст как есть. "
+                "Лучше загрузи файл резюме (📄 Загрузить файл).")
     else:
+        note = pop_profile_note(profile)
         if profile.get("experience_years", 0) == 0:
             profile["experience_years"] = 1
     await router.obj.db.upsert_user(message.from_user.id,
                                     profile=json.dumps(profile, ensure_ascii=False))
     await state.clear()
-    await message.answer("✅ Профиль обновлён.", reply_markup=settings_keyboard())
+    text = "✅ Профиль обновлён."
+    if note:
+        text += "\n\n" + note
+    await message.answer(text, reply_markup=settings_keyboard())
 
 
 @router.message(SettingsFSM.waiting_resume_file)
 async def fsm_resume_file(message: Message, state: FSMContext):
-    await message.answer("🤖 Обрабатываю резюме… (может занять ~20 сек)")
+    await message.answer("🤖 Обрабатываю резюме… (может занять 30–60 сек)")
     profile, err = await parse_resume_document(message, router.obj.analyzer)
     if err:
         err_text = {
@@ -277,11 +281,14 @@ async def fsm_resume_file(message: Message, state: FSMContext):
         }
         await message.answer(err_text.get(err, "Ошибка. Попробуй ещё раз."))
         return
+    note = pop_profile_note(profile)
     await router.obj.db.upsert_user(message.from_user.id,
                                     profile=json.dumps(profile, ensure_ascii=False))
     await state.clear()
-    await message.answer("✅ Резюме обновлено, профиль пересобран.",
-                         reply_markup=settings_keyboard())
+    text = "✅ Резюме обновлено, профиль пересобран."
+    if note:
+        text += "\n\n" + note
+    await message.answer(text, reply_markup=settings_keyboard())
 
 
 async def _save_int(message: Message, state: FSMContext, field: str, lo=None, hi=None):

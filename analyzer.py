@@ -40,12 +40,21 @@ COVER_LETTER_TEMPLATE = """Здравствуйте, откликаюсь на �
 
 
 _groq_lock = asyncio.Lock()
-_groq_next_call = 0.0
-GROQ_CALL_GAP_SEC = 25.0  # ~25с между вызовами: ~2-3 шт/мин, укладываемся в OTPM
+_groq_next_call: dict[str, float] = {}
+GROQ_CALL_GAP_SEC = 25.0  # qwen: ~8000 TPM — держим ~2-3 вызова/мин
+GROQ_PARSE_CALL_GAP_SEC = 5.0  # compound: 70000 TPM — лимит не мешает
+
+# Резюме бьём на части: ~8000 символов ≈ 2300 токенов. Тело запроса держим
+# небольшим — крупные запросы Groq иногда отклоняет (413/429).
+RESUME_CHUNK_CHARS = 8000
+RESUME_MAX_CHUNKS = 3
 
 
 async def _post_groq(system: str, user: str, temperature: float = 0.3,
-                     retries: int = 5, max_tokens: int | None = None) -> str:
+                     retries: int = 5, max_tokens: int | None = None,
+                     model: str | None = None, json_mode: bool = False) -> str:
+    model = model or config.GROQ_MODEL
+    gap = GROQ_PARSE_CALL_GAP_SEC if "compound" in model else GROQ_CALL_GAP_SEC
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {config.GROQ_API_KEY}",
@@ -55,18 +64,20 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
     if not config.GROQ_PROXY:
         proxies = None
     payload = {
-        "model": config.GROQ_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "temperature": temperature,
         "max_tokens": max_tokens or config.GROQ_MAX_TOKENS,
-        "reasoning_effort": "none",
     }
+    if "compound" not in model:
+        payload["reasoning_effort"] = "none"
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
     async with _groq_lock:
-        global _groq_next_call
-        delay = _groq_next_call - time.monotonic()
+        delay = _groq_next_call.get(model, 0.0) - time.monotonic()
         if delay > 0:
             await asyncio.sleep(delay)
         for attempt in range(1, retries + 1):
@@ -76,7 +87,12 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                     proxies=proxies, timeout=config.GROQ_TIMEOUT_SEC,
                 )
                 resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
+                choice = resp.json()["choices"][0]
+                content = choice["message"]["content"]
+                if json_mode and choice.get("finish_reason") == "length":
+                    # JSON обрезан — модели не хватило max_tokens (часто из-за
+                    # внутреннего reasoning). Повтор не поможет: уходим на резерв.
+                    raise RuntimeError("Groq обрезал JSON (finish_reason=length)")
                 if not (content or "").strip():
                     # Groq-модель иногда отдаёт пустой content без ошибки
                     if attempt < retries:
@@ -86,7 +102,7 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                         await asyncio.sleep(wait)
                         continue
                     raise RuntimeError("Groq вернул пустой ответ")
-                _groq_next_call = time.monotonic() + GROQ_CALL_GAP_SEC
+                _groq_next_call[model] = time.monotonic() + gap
                 return content
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.ProxyError,
@@ -95,7 +111,7 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                 # через curl (другой TLS-стек), затем пауза и повтор requests.
                 content = await asyncio.to_thread(_post_curl_sync, url, headers, payload)
                 if content is not None:
-                    _groq_next_call = time.monotonic() + GROQ_CALL_GAP_SEC
+                    _groq_next_call[model] = time.monotonic() + gap
                     return content
                 if attempt < retries:
                     wait = min(2 ** attempt, 30)
@@ -290,7 +306,10 @@ class Analyzer:
             )
 
     async def parse_resume(self, text: str) -> dict:
-        """Парсинг текста резюме в структурированный профиль."""
+        """Парсинг текста резюме в структурированный профиль.
+
+        Длинный текст бьётся на части (лимит Groq free ~8000 токенов/мин),
+        результаты частей объединяются — данные не теряются."""
         system = (
             "Ты — парсер резюме. Из текста резюме извлекаешь данные и "
             "возвращаешь строго JSON: "
@@ -298,41 +317,167 @@ class Analyzer:
             '"education","city","salary_expectation","about","projects":[]} '
             "Опыт указывай с округлением, например 1.5."
         )
-        # Лимит Groq free ~8000 токенов/мин: сжимаем пробелы и режем текст,
-        # иначе резюме не влезает и приходит 429
         compact = re.sub(r"[ \t]+", " ", text or "").strip()
-        compact = re.sub(r"\n{3,}", "\n\n", compact)[:7000]
-        for attempt in (1, 2):
-            try:
-                out = await _post_groq(system, compact, max_tokens=1200)
-                data = _extract_json(out)
-                skills = data.get("skills", [])
-                if isinstance(skills, str):
-                    skills = [s.strip() for s in skills.split(",") if s.strip()]
-                projects = data.get("projects", [])
-                if isinstance(projects, str):
-                    projects = [p.strip() for p in projects.split(";") if p.strip()]
-                profile = {
-                    "name": data.get("name", ""),
-                    "title": data.get("title", ""),
-                    "skills": skills,
-                    "experience_years": float(data.get("experience_years", 0) or 0),
-                    "languages": data.get("languages", []),
-                    "education": data.get("education", ""),
-                    "city": data.get("city", ""),
-                    "salary_expectation": int(data.get("salary_expectation", 0) or 0),
-                    "about": data.get("about", ""),
-                    "projects": projects,
-                }
-                # Мусорный/пустой ответ (например, вложенный объект проекта) —
-                # уходим на повтор
-                if not (profile["skills"] or profile["about"]):
-                    raise ValueError("ответ модели пуст или неполон")
-                return profile
-            except Exception as e:
-                if attempt == 1:
-                    log.warning("Парсинг резюме не удался, повтор: %s", e)
-                    await asyncio.sleep(3)
-                    continue
-                log.exception("Ошибка парсинга резюме")
-                return {}
+        compact = re.sub(r"\n{3,}", "\n\n", compact)
+        max_chars = RESUME_CHUNK_CHARS * RESUME_MAX_CHUNKS
+        truncated = len(compact) > max_chars
+        compact = compact[:max_chars]
+        if not compact:
+            return {}
+
+        # Для каждой части: сначала модель парсинга (большой TPM), при сбое —
+        # резервная. Так один капризный запрос не теряет часть резюме.
+        models: list[tuple[str, int]] = []
+        for m, mt in ((config.GROQ_PARSE_MODEL, 2000), (config.GROQ_MODEL, 1500)):
+            if m and m not in [x[0] for x in models]:
+                models.append((m, mt))
+
+        n_chunks = max(1, -(-len(compact) // RESUME_CHUNK_CHARS))
+        size = max(1, -(-len(compact) // n_chunks))
+        chunks = [compact[i:i + size] for i in range(0, len(compact), size)]
+
+        parts: list[dict] = []
+        failed = 0
+        used: list[str] = []
+        for idx, chunk in enumerate(chunks, 1):
+            for model, max_tokens in models:
+                part = await self._parse_resume_chunk(
+                    system, chunk, idx, len(chunks), model, max_tokens)
+                if part:
+                    parts.append(part)
+                    used.append(model)
+                    break
+            else:
+                failed += 1
+        if not parts:
+            log.error("Резюме не распарсилось (частей: %s)", len(chunks))
+            return {}
+
+        profile = _merge_profiles(parts)
+        # Хвост/части могли не попасть — отдадим в мете для предупреждения
+        profile["_meta"] = {
+            "chunks": len(chunks),
+            "failed_chunks": failed,
+            "truncated": truncated,
+            "chars": len(compact),
+            "model": "+".join(sorted(set(used))),
+        }
+        return profile
+
+    async def _parse_resume_chunk(self, system: str, chunk: str, idx: int,
+                                  total: int, model: str,
+                                  max_tokens: int) -> dict | None:
+        """Распарсить одну часть резюме. None — если не удалось."""
+        user = chunk if total == 1 else f"(часть {idx} из {total})\n{chunk}"
+        try:
+            out = await _post_groq(system, user, max_tokens=max_tokens,
+                                   model=model, json_mode=True)
+            data = _extract_json(out)
+            skills = data.get("skills", [])
+            if isinstance(skills, str):
+                skills = [s.strip() for s in skills.split(",") if s.strip()]
+            projects = data.get("projects", [])
+            if isinstance(projects, str):
+                projects = [p.strip() for p in projects.split(";") if p.strip()]
+            parsed = {
+                "name": data.get("name", ""),
+                "title": data.get("title", ""),
+                "skills": skills,
+                "experience_years": _num(data.get("experience_years")),
+                "languages": data.get("languages", []),
+                "education": data.get("education", ""),
+                "city": data.get("city", ""),
+                "salary_expectation": int(_num(data.get("salary_expectation"))),
+                "about": data.get("about", ""),
+                "projects": projects,
+            }
+            # Мусорный/пустой ответ (например, вложенный объект) — сбой части
+            if not (parsed["skills"] or parsed["about"] or parsed["title"]):
+                log.warning("Часть %s/%s резюме: ответ неполон", idx, total)
+                return None
+            return parsed
+        except Exception as e:
+            log.warning("Часть %s/%s резюме не распарсилась: %s", idx, total, e)
+            return None
+
+
+def _num(value, cast=float):
+    """Число из ответа модели: 1.5, «1 год», «Не указано» — без падений."""
+    if isinstance(value, (int, float)):
+        return cast(value)
+    m = re.search(r"\d+(?:[.,]\d+)?", str(value or ""))
+    return cast(m.group(0).replace(",", ".")) if m else cast(0)
+
+
+def _norm_key(value) -> str:
+    """Ключ для дедупликации: регистр и варианты дефисов не важны."""
+    s = str(value).lower()
+    for ch in "\u2010\u2011\u2012\u2013\u2014":
+        s = s.replace(ch, "-")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _lang_name(raw: str) -> str:
+    """«Russian – native»/«английский C1» → каноничное название языка."""
+    k = _norm_key(raw)
+    if "russian" in k or "русск" in k:
+        return "Русский"
+    if "english" in k or "англ" in k:
+        return "Английский"
+    return raw.strip()
+
+
+def _merge_profiles(parts: list[dict]) -> dict:
+    """Объединить профили, распарсенные по частям (без потери данных)."""
+    def first(key: str):
+        for p in parts:
+            if p.get(key):
+                return p[key]
+        return ""
+
+    def union(key: str) -> list:
+        out: list = []
+        seen: set = set()
+        for p in parts:
+            for item in (p.get(key) or []):
+                val = item.strip() if isinstance(item, str) else item
+                k = _norm_key(val)
+                if val and k not in seen:
+                    seen.add(k)
+                    out.append(val)
+        return out
+
+    abouts: list[str] = []
+    for p in parts:
+        a = (p.get("about") or "").strip()
+        if a and a not in abouts:
+            abouts.append(a)
+    skills = union("skills")
+    skill_keys = {_norm_key(s) for s in skills}
+    languages: list = []
+    seen_lang: set = set()
+    for p in parts:
+        for lang in (p.get("languages") or []):
+            if not isinstance(lang, str) or not lang.strip():
+                continue
+            k = _norm_key(lang)
+            if k in skill_keys:
+                continue  # модель сунула язык программирования в языки
+            name = _lang_name(lang)
+            if _norm_key(name) not in seen_lang:
+                seen_lang.add(_norm_key(name))
+                languages.append(name)
+    return {
+        "name": first("name"),
+        "title": first("title"),
+        "skills": skills,
+        "experience_years": max(
+            [_num(p.get("experience_years")) for p in parts] or [0]),
+        "languages": languages,
+        "education": first("education"),
+        "city": first("city"),
+        "salary_expectation": max(
+            [int(_num(p.get("salary_expectation"))) for p in parts] or [0]),
+        "about": " ".join(abouts),
+        "projects": union("projects"),
+    }

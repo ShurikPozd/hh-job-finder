@@ -17,6 +17,9 @@ def _normalize_groq_model(name: str) -> str:
 
 
 GROQ_MODEL = _normalize_groq_model(os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"))
+# Парсинг резюме (длинный вход): у qwen лимит 8000 TPM, у compound-mini — 70000.
+# Отдельная модель, чтобы не упираться в лимит на больших резюме.
+GROQ_PARSE_MODEL = os.getenv("GROQ_PARSE_MODEL", "groq/compound-mini").strip()
 GROQ_TIMEOUT_SEC = int(os.getenv("GROQ_TIMEOUT_SEC") or 45)
 # Бесплатный тир Groq: ~1000 output-токенов/мин — режем max_tokens,
 # чтобы успевало несколько вызовов в минуту

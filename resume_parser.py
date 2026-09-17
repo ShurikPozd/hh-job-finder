@@ -126,3 +126,23 @@ async def parse_resume_document(message, analyzer):
     if profile.get("experience_years", 0) == 0:
         profile["experience_years"] = 1  # пет-проекты засчитываются как ~1 год
     return profile, None
+
+
+def pop_profile_note(profile: dict) -> str | None:
+    """Достать служебную мету парсинга (кол-во частей/обрезка) и вернуть
+    предупреждение для пользователя. Мету удаляет, чтобы не ушла в БД."""
+    meta = profile.pop("_meta", None) or {}
+    notes = []
+    if meta.get("truncated"):
+        notes.append("⚠️ Резюме оказалось очень длинным — хвост не обработан. "
+                     "Проверь профиль и дополни нужное вручную.")
+    failed = meta.get("failed_chunks") or 0
+    if failed:
+        notes.append(f"⚠️ {failed} часть(и) резюме не удалось разобрать — "
+                     "профиль может быть неполным.")
+    elif (meta.get("chunks") or 1) > 1:
+        notes.append("ℹ️ Резюме длинное — разобрал по частям, данные собраны целиком.")
+    elif (meta.get("chars") or 0) > 8000:
+        notes.append(f"ℹ️ Резюме длинное (~{meta['chars']} симв.) — "
+                     "прочитал целиком, данные собраны полностью.")
+    return "\n".join(notes) if notes else None
