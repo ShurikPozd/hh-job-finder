@@ -190,7 +190,7 @@ async def cb_bank(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.message(BankFSM.waiting_bank_file)
+@router.message(BankFSM.waiting_bank_file, F.document)
 async def fsm_bank_file(message, state: FSMContext):
     if not message.document:
         return
@@ -204,3 +204,9 @@ async def fsm_bank_file(message, state: FSMContext):
     await router.obj.db.upsert_user(message.from_user.id, profile_bank=text)
     await state.clear()
     await message.answer("✅ Банк загружен и сохранён.", reply_markup=settings_keyboard())
+
+
+@router.message(BankFSM.waiting_bank_file)
+async def fsm_bank_file_other(message, state: FSMContext):
+    await message.answer("Пришли файл .md или .txt — или нажми «↩️ Отмена».",
+                         reply_markup=cancel_keyboard())

@@ -74,7 +74,9 @@ class App:
 
     async def startup(self):
         await self.db.connect()
-        session = AiohttpSession(proxy=config.TG_PROXY)
+        # Таймаут поднят: скачивание файлов резюме из Telegram через SOCKS
+        # идёт медленно, дефолта 60 сек не хватает (ловили TimeoutError)
+        session = AiohttpSession(proxy=config.TG_PROXY, timeout=config.TG_API_TIMEOUT)
         self.bot = Bot(config.BOT_TOKEN, session=session)
         self.dispatcher["db"] = self.db
         self.dispatcher["bot"] = self.bot
@@ -82,12 +84,13 @@ class App:
         self.analyzer = self.service.analyzer
         ctx_router.obj = self
 
+        from handlers import common as h_common
         from handlers import start as h_start
         from handlers import search as h_search
         from handlers import settings as h_settings
         from handlers import callbacks as h_callbacks
         from handlers import misc as h_misc
-        for r in (h_start.router, h_search.router, h_settings.router,
+        for r in (h_common.router, h_start.router, h_search.router, h_settings.router,
                   h_callbacks.router, h_misc.router):
             r.obj = self
             self.dispatcher.include_router(r)
@@ -102,6 +105,7 @@ class App:
             BotCommand(command="vacancies", description="Присланные вакансии"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="status", description="Статус и статистика"),
+            BotCommand(command="recheck", description="Перепроверка пропущенных"),
             BotCommand(command="help", description="Справка"),
         ])
 
@@ -170,6 +174,10 @@ def _http_app():
 async def main():
     await app.startup()
     backup_task = asyncio.create_task(cloud_backup.backup_loop(app.db))
+    recheck_task = None
+    if config.RECHECK_ENABLED:
+        from recheck import recheck_loop
+        recheck_task = asyncio.create_task(recheck_loop(app.service))
     try:
         await asyncio.gather(
             app.dispatcher.start_polling(app.bot),
@@ -177,8 +185,12 @@ async def main():
         )
     finally:
         backup_task.cancel()
+        if recheck_task:
+            recheck_task.cancel()
         try:
             await backup_task
+            if recheck_task:
+                await recheck_task
         except asyncio.CancelledError:
             pass
 

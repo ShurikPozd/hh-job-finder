@@ -21,6 +21,7 @@ HELP_TEXT = (
     "/vacancies — список уже присланных вакансий\n"
     "/settings — настройки фильтров, банка и профиля\n"
     "/status — текущий профиль и статистика\n"
+    "/recheck — перепроверка пропущенных вакансий\n"
     "/help — эта справка\n\n"
     "💡 Клавиатура внизу дублирует команды, а в сообщениях вакансий "
     "есть кнопки «Подробнее», «Сопроводительное», «Откликнулся»."
@@ -45,6 +46,12 @@ async def cmd_status(message: Message):
     usage = await router.obj.db.llm_usage_today()
     last_search = user.get("last_search_at") or "ещё не было"
     skills = skills_line(profile.get("skills"), limit=20)
+    resume = user.get("resume_text")
+    resume_line = "📄 Резюме: не сохранено"
+    if resume:
+        resume_line = f"📄 Резюме: загружено {str(user.get('resume_at') or '')[:10]} · {len(resume)} симв."
+    rc = await router.obj.db.recheck_stats()
+    recheck_line = f"🔁 Перепроверка: {rc['pending']} в очереди · найдено {rc['sent']}"
     lines = [
         "📊 Статус:\n",
         f"👤 {profile.get('name') or '—'} · {profile.get('title') or '—'}",
@@ -55,12 +62,14 @@ async def cmd_status(message: Message):
         f"🔔 Уведомления: {'вкл' if user.get('notifications_enabled', 1) else 'выкл'}",
         f"🎫 Аккредитация: {'только IT-аккредитованные' if user.get('only_accredited', 1) else 'любые'}",
         f"📁 Банк профиля: {bank}",
+        resume_line,
         "",
         f"💼 Прислано вакансий: {stats['sent']}",
         f"✅ Откликнулся: {stats['responded']}",
         f"🚫 Скрыто: {stats['hidden']}",
         f"🕐 Последний поиск: {last_search}",
         f"⏳ Идёт поиск сейчас: {'да' if router.obj.is_searching(user_id) else 'нет'}",
+        recheck_line,
         f"🔌 LLM сегодня: {usage['calls']} вызовов · {usage['tokens']} токенов",
     ]
     if usage["models"]:
@@ -100,6 +109,34 @@ async def show_vacancy_list(who, page: int = 0, sort: str = "date",
     text = f"🗂 Присланные вакансии · {first}–{last} из {total}"
     kb = vacancy_list_keyboard(items, page, total_pages, sort, filter_)
     await target(text, reply_markup=kb)
+
+
+@router.message(Command("recheck"))
+async def cmd_recheck(message: Message):
+    user_id = message.from_user.id
+    user = await router.obj.db.get_user(user_id)
+    if not user or not user.get("onboarding_done"):
+        await message.answer("Сначала настрой профиль: /start")
+        return
+    db = router.obj.db
+    stats = await db.recheck_stats()
+    base = ""
+    if stats["pending"] == 0:
+        added = await db.recheck_seed()
+        stats = await db.recheck_stats()
+        base = f"Очередь была пуста — добавил пропущенных: {added}.\n\n"
+    models = [m for m in (config.GROQ_SCORE_MODEL, config.GROQ_MODEL) if m]
+    used = await db.llm_tokens_today(models, source="recheck")
+    await message.answer(
+        base
+        + "🔁 Перепроверка пропущенных вакансий:\n"
+        + f"⏳ В очереди: {stats['pending']}\n"
+        + f"✅ Проверено: {stats['done']}\n"
+        + f"↩ Найдено и прислано: {stats['sent']}\n"
+        + f"❌ Ошибок: {stats['failed']}\n"
+        + f"🔌 Сегодня на перепроверку: {used} / {config.RECHECK_TOKEN_BUDGET_PER_DAY} токенов\n"
+        + f"⏱ Автозапуск: каждые {config.RECHECK_INTERVAL_MIN} мин"
+    )
 
 
 @router.message(Command("vacancies"))

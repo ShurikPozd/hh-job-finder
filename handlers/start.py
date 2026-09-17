@@ -7,9 +7,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from db import DEFAULT_PROFILE
+from db import DEFAULT_PROFILE, utcnow
 from resume_parser import parse_resume_document, pop_profile_note
-from keyboards import main_keyboard
+from keyboards import main_keyboard, cancel_keyboard
 import config
 
 log = logging.getLogger("handlers.start")
@@ -66,7 +66,8 @@ async def onb_choice(call: CallbackQuery, state: FSMContext):
     if choice == "resume":
         await state.set_state(Onboarding.waiting_resume)
         await call.message.answer("Отправь файл резюме одним сообщением "
-                                  "(.txt, .docx, .pdf, .doc, .rtf):")
+                                  "(.txt, .docx, .pdf, .doc, .rtf):",
+                                  reply_markup=cancel_keyboard())
     elif choice == "manual":
         await state.set_state(Onboarding.waiting_manual)
         await call.message.answer(
@@ -74,19 +75,27 @@ async def onb_choice(call: CallbackQuery, state: FSMContext):
             "можно кратко «Начинающий Python-разработчик, знаю Python, Django, SQL, "
             "опыт 1 год, город Москва, хочу от 80к»\n"
             "или вставить текст резюме — бот разберёт его так же, как файл.\n"
-            "Для полного резюме лучше прикрепи файл."
+            "Для полного резюме лучше прикрепи файл.",
+            reply_markup=cancel_keyboard(),
         )
     elif choice == "skip":
         await _finish(call.message, call.from_user.id, DEFAULT_PROFILE, state)
 
 
-async def _finish(msg, user_id, profile: dict, state: FSMContext, note: str | None = None):
-    await router.obj.db.upsert_user(
-        user_id,
-        profile=json.dumps(profile, ensure_ascii=False),
-        onboarding_done=1,
-        notifications_enabled=1,
-    )
+async def _finish(msg, user_id, profile: dict, state: FSMContext, note: str | None = None,
+                  resume_text: str | None = None, resume_filename: str | None = None):
+    fields = {
+        "profile": json.dumps(profile, ensure_ascii=False),
+        "onboarding_done": 1,
+        "notifications_enabled": 1,
+    }
+    if resume_text:
+        fields.update(
+            resume_text=resume_text[:50000],
+            resume_filename=resume_filename,
+            resume_at=utcnow(),
+        )
+    await router.obj.db.upsert_user(user_id, **fields)
     await state.clear()
     text = (
         "✅ Профиль готов!\n\n"
@@ -102,15 +111,18 @@ async def _finish(msg, user_id, profile: dict, state: FSMContext, note: str | No
     router.obj.backup_now()
 
 
-@router.message(Onboarding.waiting_resume)
+@router.message(Onboarding.waiting_resume, F.document)
 async def onb_resume(message: Message, state: FSMContext):
     await message.answer("🤖 Обрабатываю резюме… (может занять 30–60 сек)")
-    profile, err = await parse_resume_document(message, router.obj.analyzer)
+    profile, err, text = await parse_resume_document(message, router.obj.analyzer)
     if err:
         err_text = {
             "not_doc": "Отправь файл резюме (.txt, .docx, .pdf, .doc, .rtf).",
             "ext": "Поддерживаются: .txt, .docx, .pdf, .doc, .rtf. Попробуй ещё раз.",
             "read": "Не удалось прочитать файл. Попробуй другой или введи текстом.",
+            "download": "Не удалось скачать файл из Telegram (сеть/прокси). "
+                        "Попробуй ещё раз или пришли .txt.",
+            "too_big": "Файл слишком большой. Ужми его или сохрани как .txt.",
             "short": "Файл пуст или не распознан. Попробуй другой формат (.txt лучше).",
             "binary": "Не удалось прочитать файл (похоже на бинарный формат). "
                       "Сохрани как .txt или .docx и попробуй ещё раз.",
@@ -121,10 +133,20 @@ async def onb_resume(message: Message, state: FSMContext):
         return
 
     await _finish(message, message.from_user.id, profile, state,
-                  note=pop_profile_note(profile))
+                  note=pop_profile_note(profile),
+                  resume_text=text,
+                  resume_filename=message.document.file_name)
 
 
-@router.message(Onboarding.waiting_manual)
+@router.message(Onboarding.waiting_resume)
+async def onb_resume_other(message: Message, state: FSMContext):
+    await message.answer(
+        "Пришли файл резюме (.txt, .docx, .pdf, .doc, .rtf) — или нажми «↩️ Отмена».",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.message(Onboarding.waiting_manual, F.text)
 async def onb_manual(message: Message, state: FSMContext):
     text = message.text or ""
     profile = await router.obj.analyzer.parse_resume(text)
@@ -138,4 +160,13 @@ async def onb_manual(message: Message, state: FSMContext):
         note = pop_profile_note(profile)
         if profile.get("experience_years", 0) == 0:
             profile["experience_years"] = 1
-    await _finish(message, message.from_user.id, profile, state, note=note)
+    await _finish(message, message.from_user.id, profile, state, note=note,
+                  resume_text=text)
+
+
+@router.message(Onboarding.waiting_manual)
+async def onb_manual_other(message: Message, state: FSMContext):
+    await message.answer(
+        "Напиши о себе текстом одним сообщением — или нажми «↩️ Отмена».",
+        reply_markup=cancel_keyboard(),
+    )

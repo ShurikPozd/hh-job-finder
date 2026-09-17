@@ -57,7 +57,10 @@ class Database:
                 only_accredited INTEGER DEFAULT 1,
                 onboarding_done INTEGER DEFAULT 0,
                 created_at TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                resume_text TEXT,
+                resume_filename TEXT,
+                resume_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS vacancies (
@@ -118,10 +121,21 @@ class Database:
             CREATE TABLE IF NOT EXISTS llm_usage (
                 day TEXT,               -- UTC-дата YYYY-MM-DD
                 model TEXT,
+                source TEXT NOT NULL DEFAULT 'search',  -- search | recheck | letter | bank | parse
                 calls INTEGER DEFAULT 0,
                 prompt_tokens INTEGER DEFAULT 0,
                 completion_tokens INTEGER DEFAULT 0,
-                PRIMARY KEY (day, model)
+                PRIMARY KEY (day, model, source)
+            );
+
+            CREATE TABLE IF NOT EXISTS recheck_queue (
+                user_id INTEGER,
+                vacancy_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',  -- pending | done | sent | failed
+                tries INTEGER NOT NULL DEFAULT 0,
+                added_at TEXT,
+                checked_at TEXT,
+                PRIMARY KEY (user_id, vacancy_id)
             );
             """
         )
@@ -129,6 +143,46 @@ class Database:
         await self._ensure_column("users", "only_accredited",
                                   "INTEGER NOT NULL DEFAULT 1")
         await self._ensure_column("users", "last_search_at", "TEXT")
+        await self._ensure_column("users", "resume_text", "TEXT")
+        await self._ensure_column("users", "resume_filename", "TEXT")
+        await self._ensure_column("users", "resume_at", "TEXT")
+        await self._migrate_llm_usage_source()
+
+    async def _migrate_llm_usage_source(self):
+        """llm_usage раньше имел PRIMARY KEY (day, model): один счётчик на модель
+        в день, без различия источника. Нужен PK (day, model, source), чтобы
+        бюджет поиска и перепроверки считались раздельно."""
+        await self._ensure_column("llm_usage", "source",
+                                  "TEXT NOT NULL DEFAULT 'search'")
+        cur = await self._conn.execute("PRAGMA index_list(llm_usage)")
+        rows = await cur.fetchall()
+        pk = None
+        for r in rows:
+            if r["unique"]:
+                sub = await self._conn.execute(f"PRAGMA index_info({r['name']})")
+                pk = [s["name"] for s in await sub.fetchall()]
+                break
+        if pk != ["day", "model", "source"]:
+            await self._conn.executescript(
+                """
+                ALTER TABLE llm_usage RENAME TO llm_usage_old;
+                CREATE TABLE llm_usage (
+                    day TEXT,
+                    model TEXT,
+                    source TEXT NOT NULL DEFAULT 'search',
+                    calls INTEGER DEFAULT 0,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    PRIMARY KEY (day, model, source)
+                );
+                INSERT INTO llm_usage (day, model, source, calls,
+                                       prompt_tokens, completion_tokens)
+                    SELECT day, model, source, calls,
+                           prompt_tokens, completion_tokens FROM llm_usage_old;
+                DROP TABLE llm_usage_old;
+                """
+            )
+            await self._conn.commit()
 
     async def _ensure_column(self, table: str, column: str, ddl: str):
         cur = await self._conn.execute(f"PRAGMA table_info({table})")
@@ -405,16 +459,16 @@ class Database:
     # ================= Учёт использования LLM =================
 
     async def add_llm_usage(self, model: str, prompt_tokens: int,
-                            completion_tokens: int):
+                            completion_tokens: int, source: str = "search"):
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         await self._conn.execute(
-            "INSERT INTO llm_usage (day, model, calls, prompt_tokens, completion_tokens) "
-            "VALUES (?, ?, 1, ?, ?) "
-            "ON CONFLICT(day, model) DO UPDATE SET "
+            "INSERT INTO llm_usage (day, model, source, calls, prompt_tokens, completion_tokens) "
+            "VALUES (?, ?, ?, 1, ?, ?) "
+            "ON CONFLICT(day, model, source) DO UPDATE SET "
             "  calls = calls + 1, "
             "  prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
             "  completion_tokens = completion_tokens + excluded.completion_tokens",
-            (day, model, int(prompt_tokens or 0), int(completion_tokens or 0)),
+            (day, model, source, int(prompt_tokens or 0), int(completion_tokens or 0)),
         )
         await self._conn.commit()
 
@@ -432,34 +486,112 @@ class Database:
             "tokens": sum(r["prompt_tokens"] + r["completion_tokens"] for r in rows),
         }
 
-    async def llm_calls_today(self, models: list[str] | None = None) -> int:
+    async def llm_calls_today(self, models: list[str] | None = None,
+                              source: str | None = None) -> int:
         """Сколько LLM-вызовов уже сделано сегодня (для бюджета прогона)."""
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cond = ["day = ?"]
+        params: list = [day]
         if models:
             q = ",".join("?" * len(models))
-            cur = await self._conn.execute(
-                f"SELECT COALESCE(SUM(calls), 0) c FROM llm_usage "
-                f"WHERE day = ? AND model IN ({q})", (day, *models))
-        else:
-            cur = await self._conn.execute(
-                "SELECT COALESCE(SUM(calls), 0) c FROM llm_usage WHERE day = ?", (day,))
+            cond.append(f"model IN ({q})")
+            params.extend(models)
+        if source:
+            cond.append("source = ?")
+            params.append(source)
+        cur = await self._conn.execute(
+            f"SELECT COALESCE(SUM(calls), 0) c FROM llm_usage "
+            f"WHERE {' AND '.join(cond)}", params)
         row = await cur.fetchone()
         return int(row["c"]) if row else 0
 
-    async def llm_tokens_today(self, models: list[str] | None = None) -> int:
-        """Потрачено токенов (вход+выход) сегодня — основа бюджета скоринга."""
+    async def llm_tokens_today(self, models: list[str] | None = None,
+                               source: str | None = None) -> int:
+        """Потрачено токенов (вход+выход) сегодня — основа бюджета скоринга.
+        source: 'search' | 'recheck' | None (любой источник)."""
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cond = ["day = ?"]
+        params: list = [day]
         if models:
             q = ",".join("?" * len(models))
-            cur = await self._conn.execute(
-                f"SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) t "
-                f"FROM llm_usage WHERE day = ? AND model IN ({q})", (day, *models))
-        else:
-            cur = await self._conn.execute(
-                "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) t "
-                "FROM llm_usage WHERE day = ?", (day,))
+            cond.append(f"model IN ({q})")
+            params.extend(models)
+        if source:
+            cond.append("source = ?")
+            params.append(source)
+        cur = await self._conn.execute(
+            f"SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) t "
+            f"FROM llm_usage WHERE {' AND '.join(cond)}", params)
         row = await cur.fetchone()
         return int(row["t"]) if row else 0
+
+    # ================= Очередь перепроверки пропущенных =================
+
+    async def recheck_seed(self) -> int:
+        """Сбросить в очередь все «увиденные, но не сохранённые» вакансии
+        (seen без записи в vacancies). Идемпотентно: PK уже в очереди не дублирует.
+        Возвращает число добавленных."""
+        cur = await self._conn.execute(
+            "INSERT OR IGNORE INTO recheck_queue (user_id, vacancy_id, added_at) "
+            "SELECT s.user_id, s.vacancy_id, ? FROM seen_vacancies s "
+            "WHERE s.status = 'seen' "
+            "AND NOT EXISTS (SELECT 1 FROM vacancies v WHERE v.vacancy_id = s.vacancy_id)",
+            (utcnow(),),
+        )
+        await self._conn.commit()
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    async def recheck_next(self, batch: int) -> list[dict]:
+        """Следующие pending-вакансии, самые свежие по last_seen первыми."""
+        cur = await self._conn.execute(
+            "SELECT q.user_id, q.vacancy_id, "
+            "(SELECT s.last_seen FROM seen_vacancies s "
+            " WHERE s.user_id = q.user_id AND s.vacancy_id = q.vacancy_id) AS last_seen "
+            "FROM recheck_queue q WHERE q.status = 'pending' "
+            "ORDER BY last_seen DESC LIMIT ?",
+            (batch,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def recheck_finish(self, user_id: int, vacancy_id: str, status: str):
+        await self._conn.execute(
+            "UPDATE recheck_queue SET status = ?, checked_at = ?, tries = tries + 1 "
+            "WHERE user_id = ? AND vacancy_id = ?",
+            (status, utcnow(), user_id, vacancy_id),
+        )
+        await self._conn.commit()
+
+    async def recheck_fail(self, user_id: int, vacancy_id: str) -> bool:
+        """Пометить ошибку. Возвращает True, если попытки исчерпаны (failed)."""
+        cur = await self._conn.execute(
+            "UPDATE recheck_queue SET tries = tries + 1, checked_at = ? "
+            "WHERE user_id = ? AND vacancy_id = ? RETURNING tries",
+            (utcnow(), user_id, vacancy_id),
+        )
+        row = await cur.fetchone()
+        await self._conn.commit()
+        tries = row[0] if row else 0
+        if tries >= 3:
+            await self._conn.execute(
+                "UPDATE recheck_queue SET status = 'failed' "
+                "WHERE user_id = ? AND vacancy_id = ? AND status = 'pending'",
+                (user_id, vacancy_id),
+            )
+            await self._conn.commit()
+            return True
+        return False
+
+    async def recheck_stats(self) -> dict:
+        cur = await self._conn.execute(
+            "SELECT status, COUNT(*) c FROM recheck_queue GROUP BY status")
+        rows = {r["status"]: r["c"] for r in await cur.fetchall()}
+        return {
+            "pending": rows.get("pending", 0),
+            "sent": rows.get("sent", 0),
+            "done": rows.get("done", 0),
+            "failed": rows.get("failed", 0),
+        }
 
     # ================= registry cache =================
 

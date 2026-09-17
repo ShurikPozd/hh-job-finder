@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 import re
@@ -49,8 +50,12 @@ GROQ_PARSE_CALL_GAP_SEC = 5.0  # compound: 70000 TPM — лимит не меш�
 RESUME_CHUNK_CHARS = 8000
 RESUME_MAX_CHUNKS = 3
 
-# Куда писать расход токенов: async callable(model, prompt_tokens, completion_tokens)
+# Куда писать расход токенов: async callable(model, prompt_tokens, completion_tokens, source)
 _usage_hook = None
+
+# Источник расхода в текущей таскe: 'search' | 'recheck' | ...
+# Контекст-переменная — параллельные таски (поиск и перепроверка) не мешают друг другу
+_usage_source: contextvars.ContextVar[str] = contextvars.ContextVar("usage_source", default="search")
 
 
 def set_usage_hook(fn):
@@ -58,13 +63,23 @@ def set_usage_hook(fn):
     _usage_hook = fn
 
 
+def set_usage_source(source: str) -> contextvars.Token:
+    return _usage_source.set(source)
+
+
+def reset_usage_source(token: contextvars.Token) -> None:
+    _usage_source.reset(token)
+
+
 async def _record_usage(model: str, usage: dict | None):
     if _usage_hook is None:
         return
     usage = usage or {}
     try:
-        await _usage_hook(model, usage.get("prompt_tokens", 0),
-                          usage.get("completion_tokens", 0))
+        await _usage_hook(model,
+                          usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0),
+                          _usage_source.get())
     except Exception as e:  # учёт не должен ломать основную работу
         log.warning("Не записал llm_usage: %s", e)
 
@@ -288,8 +303,13 @@ class Analyzer:
                 models.append(m)
         for model in models:
             try:
+                mt = config.GROQ_SCORE_MAX_TOKENS
+                if "compound" in model:
+                    # compound — агент: тратит max_tokens на reasoning/инструменты
+                    # и режет JSON; даём запас
+                    mt = 1000
                 out = await _post_groq(system, user,
-                                       max_tokens=config.GROQ_SCORE_MAX_TOKENS,
+                                       max_tokens=mt,
                                        model=model)
                 data = _extract_json(out)
                 return {
@@ -494,8 +514,12 @@ def _norm_key(value) -> str:
 
 
 def _lang_name(raw: str) -> str:
-    """«Russian – native»/«английский C1» → каноничное название языка."""
+    """«Russian – native»/«английский C1»/«ru» → каноничное название языка."""
     k = _norm_key(raw)
+    if k in ("ru", "rus"):
+        return "Русский"
+    if k in ("en", "eng"):
+        return "Английский"
     if "russian" in k or "русск" in k:
         return "Русский"
     if "english" in k or "англ" in k:

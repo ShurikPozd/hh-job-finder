@@ -104,6 +104,29 @@ def bank_keyboard() -> InlineKeyboardMarkup:
     return kb
 
 
+def profile_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🧾 Что понял бот", callback_data="set:profile_full"),
+        ],
+        [
+            InlineKeyboardButton(text="👁 Резюме", callback_data="set:resume_view"),
+            InlineKeyboardButton(text="📥 Резюме файлом", callback_data="set:resume_download"),
+        ],
+        [
+            InlineKeyboardButton(text="♻️ Распарсить заново", callback_data="set:reparse"),
+        ],
+        [
+            InlineKeyboardButton(text="📄 Загрузить файл", callback_data="set:profile_reupload"),
+            InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="set:profile_edit"),
+        ],
+        [
+            InlineKeyboardButton(text="↩️ Назад", callback_data="settings"),
+        ],
+    ])
+    return kb
+
+
 def cancel_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Отмена", callback_data="cancel")],

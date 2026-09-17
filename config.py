@@ -41,6 +41,15 @@ SCORE_EST_TOKENS = int(os.getenv("SCORE_EST_TOKENS") or 1500)
 SCORE_TOKEN_BUDGET_PER_RUN = int(os.getenv("SCORE_TOKEN_BUDGET_PER_RUN") or 6000)
 SCORE_TOKEN_BUDGET_PER_DAY = int(os.getenv("SCORE_TOKEN_BUDGET_PER_DAY") or 60000)
 
+# ===== Перепроверка пропущенных вакансий =====
+# Очередь seen-без-vacancies: воркер каждые N минут берёт пачку, фильтрует по
+# аккредитации и скорингу, находки присылает с пометкой «↩ найдена при перепроверке».
+# Бюджет отдельный от поиска (учитывается через llm_usage.source='recheck').
+RECHECK_ENABLED = int(os.getenv("RECHECK_ENABLED") or 1) == 1
+RECHECK_BATCH = int(os.getenv("RECHECK_BATCH") or 5)
+RECHECK_INTERVAL_MIN = int(os.getenv("RECHECK_INTERVAL_MIN") or 20)
+RECHECK_TOKEN_BUDGET_PER_DAY = int(os.getenv("RECHECK_TOKEN_BUDGET_PER_DAY") or 20000)
+
 # ===== БД =====
 DB_PATH = os.getenv("DB_PATH", os.path.join("data", "hh_job_finder.db"))
 
@@ -85,6 +94,9 @@ HTTP_PORT = int(os.getenv("PORT") or os.getenv("HTTP_PORT") or 0)
 # ===== Прокси (для локального запуска из РФ) =====
 TG_PROXY = os.getenv("TG_PROXY", "").strip() or None  # например socks5://127.0.0.1:9050
 GROQ_PROXY = os.getenv("GROQ_PROXY", "").strip() or None
+# Таймаут API Telegram: скачивание файлов резюме через SOCKS идёт медленно,
+# дефолта 60 сек не хватает (ловили TimeoutError на 31-й секунде)
+TG_API_TIMEOUT = float(os.getenv("TG_API_TIMEOUT") or 150)
 
 # Количество одновременных запросов к hh.ru
 HH_CONCURRENCY = int(os.getenv("HH_CONCURRENCY") or 3)

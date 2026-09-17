@@ -1,9 +1,13 @@
+import asyncio
 import io
 import logging
 import re
 from pathlib import Path
 
 log = logging.getLogger("resume_parser")
+
+# Telegram Bot API: документы до 50 МБ; больше — бессмысленно тянуть по прокси
+MAX_RESUME_SIZE = 50 * 1024 * 1024
 
 
 def extract_text(filename: str, data: bytes) -> str:
@@ -96,36 +100,62 @@ def extract_email(text: str) -> str | None:
     return m.group(0) if m else None
 
 
+async def _download_with_retry(message, doc, attempts: int = 3) -> bytes:
+    """Скачать файл из Telegram с ретраями. Скачивание по SOCKS-прокси из РФ
+    нестабильно (ловили asyncio.TimeoutError на 31-й секунде)."""
+    last_exc: Exception | None = None
+    for i in range(1, attempts + 1):
+        try:
+            data = await message.bot.download(doc, destination=None)
+            raw = data.getvalue() if hasattr(data, "getvalue") else data
+            return bytes(raw)
+        except Exception as e:
+            last_exc = e
+            log.warning("Скачивание %s, попытка %s/%s: %s",
+                        doc.file_name, i, attempts, e)
+            if i < attempts:
+                await asyncio.sleep(2 * i)
+    assert last_exc is not None
+    raise last_exc
+
+
 async def parse_resume_document(message, analyzer):
     """Скачивает и парсит файл резюме (.txt/.docx/.pdf/.doc).
 
-    Возвращает (profile | None, error_tag | None). error_tag один из:
-    not_doc | ext | read | short | binary | parse
+    Возвращает (profile | None, error_tag | None, text | None), где text —
+    распознанный текст файла (для сохранения и просмотра).
+    error_tag один из: not_doc | ext | read | short | binary | parse
+    | download | too_big
     """
     if not message.document:
-        return None, "not_doc"
+        return None, "not_doc", None
     doc = message.document
     ext = (doc.file_name or "").split(".")[-1].lower()
     if ext not in ("txt", "docx", "pdf", "doc", "rtf"):
-        return None, "ext"
+        return None, "ext", None
+    if doc.file_size and doc.file_size > MAX_RESUME_SIZE:
+        return None, "too_big", None
     try:
-        data = await message.bot.download(doc, destination=None)
-        raw = data.getvalue() if hasattr(data, "getvalue") else data
+        raw = await _download_with_retry(message, doc)
+    except Exception:
+        log.exception("Не удалось скачать резюме %s", doc.file_name)
+        return None, "download", None
+    try:
         text = extract_text(doc.file_name, raw)
     except Exception:
-        log.exception("Ошибка загрузки резюме")
-        return None, "read"
+        log.exception("Ошибка извлечения текста %s", doc.file_name)
+        return None, "read", None
     if len(text) < 50:
-        return None, "short"
+        return None, "short", None
     printable = sum(1 for c in text if c.isprintable())
     if printable / max(len(text), 1) < 0.6:
-        return None, "binary"
+        return None, "binary", None
     profile = await analyzer.parse_resume(text)
     if not profile:
-        return None, "parse"
+        return None, "parse", None
     if profile.get("experience_years", 0) == 0:
         profile["experience_years"] = 1  # пет-проекты засчитываются как ~1 год
-    return profile, None
+    return profile, None, text
 
 
 def pop_profile_note(profile: dict) -> str | None:

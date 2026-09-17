@@ -3,13 +3,15 @@ import logging
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
+                           InlineKeyboardButton, BufferedInputFile)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 import config
-from db import DEFAULT_PROFILE
-from keyboards import settings_keyboard, bank_keyboard, cancel_keyboard
+from db import DEFAULT_PROFILE, utcnow
+from keyboards import (settings_keyboard, bank_keyboard, cancel_keyboard,
+                       profile_keyboard)
 from resume_parser import parse_resume_document, pop_profile_note
 
 log = logging.getLogger("handlers.settings")
@@ -123,21 +125,61 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
     elif action == "profile":
         cur = json.loads(user.get("profile") or "{}")
         await call.message.edit_text(
-            "Текущий профиль:\n"
-            f"👤 {cur.get('name') or '—'}\n"
-            f"💼 {cur.get('title') or '—'}\n"
+            "📝 Профиль и резюме:\n"
+            f"👤 {cur.get('name') or '—'} · {cur.get('title') or '—'}\n"
             f"🛠 Навыки: {', '.join(cur.get('skills') or [])}\n"
             f"📊 Опыт: {cur.get('experience_years')} лет\n"
             f"💰 Зарплата: {cur.get('salary_expectation')}\n\n"
-            "Можно обновить резюме файлом или ввести текст вручную.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📄 Загрузить файл",
-                                      callback_data="set:profile_reupload")],
-                [InlineKeyboardButton(text="✏️ Ввести вручную",
-                                      callback_data="set:profile_edit")],
-                [InlineKeyboardButton(text="↩️ Назад", callback_data="settings")],
-            ]),
+            "Тут можно посмотреть, что понял бот, и сам текст резюме — "
+            "или обновить профиль файлом / вручную.",
+            reply_markup=profile_keyboard(),
         )
+    elif action == "profile_full":
+        cur = json.loads(user.get("profile") or "{}")
+        lines = [
+            "🧾 Профиль (что понял бот):\n",
+            f"👤 {cur.get('name') or '—'}",
+            f"💼 {cur.get('title') or '—'}",
+            f"📍 Город: {cur.get('city') or '—'}",
+            f"📊 Опыт: {cur.get('experience_years')} лет",
+            f"💳 Ожидание по ЗП: {cur.get('salary_expectation') or '—'}",
+            f"🌐 Языки: {', '.join(cur.get('languages') or []) or '—'}",
+            f"🎓 Образование:\n{cur.get('education') or '—'}",
+        ]
+        if cur.get("projects"):
+            lines.append("👷 Проекты:\n• " + "\n• ".join(cur.get("projects")))
+        if cur.get("about"):
+            lines.append(f"🧠 Обо мне:\n{cur.get('about')[:1200]}")
+        if cur.get("skills"):
+            lines.append("🛠 Навыки: " + ", ".join(cur.get("skills")))
+        await _chunk_reply(call, "\n".join(lines), profile_keyboard())
+    elif action == "resume_view":
+        await _show_resume(call, user, as_file=False)
+    elif action == "resume_download":
+        await _show_resume(call, user, as_file=True)
+    elif action == "reparse":
+        resume = user.get("resume_text")
+        if not resume:
+            await call.message.edit_text(
+                "Нет сохранённого текста резюме — загрузи файл.",
+                reply_markup=profile_keyboard())
+        else:
+            await call.message.edit_text("🤖 Переразбираю резюме… (~20 сек)")
+            profile = await router.obj.analyzer.parse_resume(resume)
+            note = None
+            if not profile:
+                profile = json.loads(user.get("profile") or "{}")
+                note = "⚠️ Не удалось распарсить заново — профиль остался прежним."
+            else:
+                note = pop_profile_note(profile)
+                if profile.get("experience_years", 0) == 0:
+                    profile["experience_years"] = 1
+            await router.obj.db.upsert_user(
+                user_id, profile=json.dumps(profile, ensure_ascii=False))
+            text = "✅ Профиль пересобран из сохранённого текста резюме."
+            if note:
+                text += "\n\n" + note
+            await call.message.answer(text, reply_markup=profile_keyboard())
     elif action == "profile_reupload":
         await state.set_state(SettingsFSM.waiting_resume_file)
         await call.message.edit_text(
@@ -220,30 +262,44 @@ async def cb_sch(call: CallbackQuery):
     await call.message.edit_text("✅ Сохранено.", reply_markup=settings_keyboard())
 
 
-@router.message(SettingsFSM.enter_keywords)
+@router.message(SettingsFSM.enter_keywords, F.text)
 async def fsm_keywords(message: Message, state: FSMContext):
     await router.obj.db.upsert_user(message.from_user.id, keywords=message.text)
     await state.clear()
     await message.answer("✅ Ключевые слова обновлены.", reply_markup=settings_keyboard())
 
 
-@router.message(SettingsFSM.enter_salary)
+@router.message(SettingsFSM.enter_keywords)
+async def fsm_keywords_other(message: Message, state: FSMContext):
+    await message.answer("Введи ключевые слова текстом — или нажми «↩️ Отмена».",
+                         reply_markup=cancel_keyboard())
+
+
+@router.message(SettingsFSM.enter_salary, F.text)
 async def fsm_salary(message: Message, state: FSMContext):
     await _save_int(message, state, "min_salary")
 
 
-@router.message(SettingsFSM.enter_threshold)
+@router.message(SettingsFSM.enter_threshold, F.text)
 async def fsm_threshold(message: Message, state: FSMContext):
     await _save_int(message, state, "match_threshold", 0, 10)
 
 
-@router.message(SettingsFSM.enter_interval)
+@router.message(SettingsFSM.enter_interval, F.text)
 async def fsm_interval(message: Message, state: FSMContext):
     await _save_float(message, state, "search_interval_hours",
                       config.SEARCH_INTERVAL_MIN, config.SEARCH_INTERVAL_MAX)
 
 
-@router.message(SettingsFSM.enter_profile_text)
+@router.message(SettingsFSM.enter_salary)
+@router.message(SettingsFSM.enter_threshold)
+@router.message(SettingsFSM.enter_interval)
+async def fsm_number_other(message: Message, state: FSMContext):
+    await message.answer("Нужно число — или нажми «↩️ Отмена».",
+                         reply_markup=cancel_keyboard())
+
+
+@router.message(SettingsFSM.enter_profile_text, F.text)
 async def fsm_profile(message: Message, state: FSMContext):
     profile = await router.obj.analyzer.parse_resume(message.text)
     note = None
@@ -257,7 +313,10 @@ async def fsm_profile(message: Message, state: FSMContext):
         if profile.get("experience_years", 0) == 0:
             profile["experience_years"] = 1
     await router.obj.db.upsert_user(message.from_user.id,
-                                    profile=json.dumps(profile, ensure_ascii=False))
+                                    profile=json.dumps(profile, ensure_ascii=False),
+                                    resume_text=message.text[:50000],
+                                    resume_filename=None,
+                                    resume_at=utcnow())
     await state.clear()
     text = "✅ Профиль обновлён."
     if note:
@@ -265,15 +324,26 @@ async def fsm_profile(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=settings_keyboard())
 
 
-@router.message(SettingsFSM.waiting_resume_file)
+@router.message(SettingsFSM.enter_profile_text)
+async def fsm_profile_other(message: Message, state: FSMContext):
+    await message.answer(
+        "Напиши профиль текстом (до 4096 символов) — или нажми «↩️ Отмена».",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.message(SettingsFSM.waiting_resume_file, F.document)
 async def fsm_resume_file(message: Message, state: FSMContext):
     await message.answer("🤖 Обрабатываю резюме… (может занять 30–60 сек)")
-    profile, err = await parse_resume_document(message, router.obj.analyzer)
+    profile, err, text = await parse_resume_document(message, router.obj.analyzer)
     if err:
         err_text = {
             "not_doc": "Отправь файл резюме (.txt, .docx, .pdf, .doc).",
             "ext": "Поддерживаются: .txt, .docx, .pdf, .doc, .rtf. Попробуй ещё раз.",
             "read": "Не удалось прочитать файл. Попробуй другой формат.",
+            "download": "Не удалось скачать файл из Telegram (сеть/прокси). "
+                        "Попробуй ещё раз или пришли .txt.",
+            "too_big": "Файл слишком большой. Ужми его или сохрани как .txt.",
             "short": "Файл пуст или не распознан. Попробуй другой формат (.txt лучше).",
             "binary": "Не удалось прочитать файл (похоже на бинарный формат). "
                       "Сохрани как .txt или .docx и попробуй ещё раз.",
@@ -283,12 +353,23 @@ async def fsm_resume_file(message: Message, state: FSMContext):
         return
     note = pop_profile_note(profile)
     await router.obj.db.upsert_user(message.from_user.id,
-                                    profile=json.dumps(profile, ensure_ascii=False))
+                                    profile=json.dumps(profile, ensure_ascii=False),
+                                    resume_text=text[:50000],
+                                    resume_filename=message.document.file_name,
+                                    resume_at=utcnow())
     await state.clear()
     text = "✅ Резюме обновлено, профиль пересобран."
     if note:
         text += "\n\n" + note
     await message.answer(text, reply_markup=settings_keyboard())
+
+
+@router.message(SettingsFSM.waiting_resume_file)
+async def fsm_resume_file_other(message: Message, state: FSMContext):
+    await message.answer(
+        "Пришли файл резюме (.txt, .docx, .pdf, .doc, .rtf) — или нажми «↩️ Отмена».",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 async def _save_int(message: Message, state: FSMContext, field: str, lo=None, hi=None):
@@ -317,3 +398,36 @@ async def _save_float(message: Message, state: FSMContext, field: str, lo, hi):
     await router.obj.db.upsert_user(message.from_user.id, **{field: val})
     await state.clear()
     await message.answer("✅ Сохранено.", reply_markup=settings_keyboard())
+
+
+async def _chunk_reply(call: CallbackQuery, text: str, kb):
+    """Длинный текст: первый кусок — edit_text, остальные — новые сообщения."""
+    chunks = [text[i:i + 3800] for i in range(0, len(text), 3800)]
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            await call.message.edit_text(chunk, reply_markup=kb)
+        else:
+            await call.message.answer(chunk, reply_markup=kb if i == len(chunks) - 1 else None)
+
+
+async def _show_resume(call: CallbackQuery, user: dict, as_file: bool):
+    resume = user.get("resume_text")
+    if not resume:
+        await call.message.edit_text(
+            "Резюме не сохранено — загрузи файл или введи текст.",
+            reply_markup=profile_keyboard())
+        return
+    if as_file:
+        await call.message.answer_document(
+            BufferedInputFile(resume.encode("utf-8"), filename="resume.txt"),
+            caption="📄 Текст загруженного резюме")
+        return
+    header = f"📄 Резюме ({str(user.get('resume_at') or '')[:10]}):\n\n"
+    body = resume
+    chunks = [header + body[i:i + 3800] for i in range(0, len(body), 3800)]
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            await call.message.edit_text(chunk, reply_markup=profile_keyboard())
+        else:
+            await call.message.answer(
+                chunk, reply_markup=profile_keyboard() if i == len(chunks) - 1 else None)

@@ -7,7 +7,8 @@ from datetime import datetime
 from aiogram import Bot, types
 
 import config
-from analyzer import Analyzer, set_usage_hook
+from analyzer import (Analyzer, set_usage_hook, set_usage_source,
+                      reset_usage_source)
 from db import Database, utcnow
 from formatters import format_card
 from hh_client import HHClient, extract_inn, text_has_accreditation
@@ -225,8 +226,10 @@ class VacancyService:
 
     # ============ Отправка в Telegram ============
 
-    async def _send_vacancy(self, user_id: int, rec: dict) -> None:
+    async def _send_vacancy(self, user_id: int, rec: dict, note: str | None = None) -> None:
         text = self.format_vacancy(rec)
+        if note:
+            text = note + "\n\n" + text
         try:
             msg = await self.bot.send_message(
                 user_id, text, reply_markup=vacancy_keyboard(rec["vacancy_id"]),
@@ -238,6 +241,60 @@ class VacancyService:
 
     def format_vacancy(self, rec: dict) -> str:
         return format_card(rec)
+
+    # ============ Перепроверка пропущенных вакансий ============
+
+    async def process_recheck_vacancy(self, user_id: int, vacancy_id: str) -> str:
+        """Одна вакансия из очереди перепроверки (seen-без-в-базе).
+
+        → 'sent' | 'done' | 'failed' | 'no_budget'.
+        Расход токенов учитывается под source='recheck'."""
+        user = await self.db.get_user(user_id)
+        if not user:
+            return "done"
+        threshold = user.get("match_threshold") or config.DEFAULT_MATCH_THRESHOLD
+        profile = json.loads(user.get("profile") or "{}")
+        try:
+            detail = await self.hh.get_vacancy(vacancy_id)
+        except Exception as e:
+            log.warning("Перепроверка %s: детали: %s", vacancy_id, e)
+            return "failed"
+
+        rec = await self._collect_record({}, detail)
+        employer_id = self._emp_id(detail.get("employer_href"))
+        rec["employer_id"] = employer_id
+        if employer_id and await self.db.has_hidden_employer(user_id, employer_id):
+            await self.db.mark_seen(user_id, vacancy_id, "hidden")
+            return "done"
+        # Фильтр ДО LLM — за отсев ниже порога не платим
+        if user.get("only_accredited", 1) and not rec.get("accredited_it"):
+            await self.db.mark_seen(user_id, vacancy_id, "seen")
+            return "done"
+
+        score_models = [m for m in (config.GROQ_SCORE_MODEL, config.GROQ_MODEL) if m]
+        if await self.db.llm_tokens_today(score_models) >= config.SCORE_TOKEN_BUDGET_PER_DAY:
+            return "no_budget"
+
+        token = set_usage_source("recheck")
+        try:
+            score_data = await self.analyzer.score_vacancy(rec, profile)
+        finally:
+            reset_usage_source(token)
+        if score_data is None:
+            return "failed"
+        rec["score"] = score_data["score"]
+        rec["llm_score"] = score_data["score"]
+        rec["llm_summary"] = score_data.get("summary", "")
+        rec["score_data"] = score_data
+
+        if score_data["score"] >= threshold:
+            await self.db.upsert_vacancy(rec)
+            await self.db.mark_seen(user_id, vacancy_id, "seen")
+            if user.get("notifications_enabled", 1):
+                await self._send_vacancy(user_id, rec, note="↩ найдена при перепроверке")
+            return "sent"
+        await self.db.mark_seen(user_id, vacancy_id, "seen")
+        return "done"
 
     # ============ Вспомогательные ============
 
