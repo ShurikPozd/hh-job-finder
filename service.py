@@ -27,8 +27,11 @@ class VacancyService:
 
     # ============ Пайплайн поиска ============
 
-    async def run_search(self, user_id: int, silent: bool = False) -> dict:
-        """Полный проход: поиск → детали → аккредитация → скоринг → отправка."""
+    async def run_search(self, user_id: int, silent: bool = False,
+                         top_n: int | None = None) -> dict:
+        """Полный проход: поиск → детали → аккредитация → скоринг → отправка.
+        top_n: при ручном поиске отправить только N лучших по соответствию.
+        silent: искать и подсчитать, но ничего не отправлять в чат."""
         user = await self.db.get_user(user_id)
         if not user:
             return {"found": 0, "sent": 0}
@@ -65,6 +68,7 @@ class VacancyService:
         log.info("Найдено %d вакансий для user %s", len(fetched), user_id)
 
         sent = 0
+        collected: list[dict] = []
         for item in fetched:
             vid = str(item["id"])
             if await self.db.is_seen(user_id, vid):
@@ -92,13 +96,21 @@ class VacancyService:
                     continue
                 await self.db.upsert_vacancy(rec)
                 await self.db.mark_seen(user_id, vid, "seen")
-                if not silent and user.get("notifications_enabled", 1):
+                if top_n is not None:
+                    collected.append(rec)
+                elif not silent and user.get("notifications_enabled", 1):
                     await self._send_vacancy(user_id, rec)
                     sent += 1
-                if silent:
+                elif silent:
                     sent += 1
             else:
                 await self.db.mark_seen(user_id, vid, "seen")
+
+        if top_n is not None and collected:
+            collected.sort(key=lambda r: r.get("llm_score", 0) or 0, reverse=True)
+            for rec in collected[: top_n]:
+                await self._send_vacancy(user_id, rec)
+                sent += 1
 
         await self.db.upsert_user(user_id, last_search_at=utcnow())
         return {"found": len(fetched), "sent": sent}
