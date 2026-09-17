@@ -1,4 +1,22 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo,
+)
+
+MAIN_MENU_BUTTONS = ("🔍 Поиск", "💼 Вакансии", "⚙️ Настройки", "📊 Статус", "❓ Помощь")
+
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="💼 Вакансии")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📊 Статус")],
+            [KeyboardButton(text="❓ Помощь")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выбери действие или введи команду…",
+    )
+    return kb
 
 
 def vacancy_keyboard(vacancy_id: str) -> InlineKeyboardMarkup:
@@ -55,6 +73,9 @@ def settings_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📁 Банк профиля", callback_data="set:bank"),
         ],
         [
+            InlineKeyboardButton(text="💼 Мои вакансии", callback_data="set:vacancies"),
+        ],
+        [
             InlineKeyboardButton(text="🚫 Скрытые вакансии", callback_data="set:hidden"),
             InlineKeyboardButton(text="🏢 Скрытые работодатели", callback_data="set:hiddenemp"),
         ],
@@ -88,3 +109,52 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="↩️ Отмена", callback_data="cancel")],
     ])
     return kb
+
+
+def vacancy_list_keyboard(items: list[dict], page: int, total_pages: int,
+                          sort: str, filter_: str) -> InlineKeyboardMarkup:
+    """Список присланных вакансий: строки-кнопки + пагинация + сортировка/фильтр."""
+    rows = []
+    for it in items:
+        prefix = "✅ " if it.get("status") == "responded" else "💼 "
+        label = prefix + (it.get("name") or it["vacancy_id"])
+        if it.get("employer_name"):
+            label += f" — {it['employer_name']}"
+        rows.append([InlineKeyboardButton(text=label[:60],
+                                          callback_data=f"vl_open:{it['vacancy_id']}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️",
+                                        callback_data=f"vl:{page - 1}:{sort}:{filter_}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}",
+                                    callback_data="vl_none"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️",
+                                        callback_data=f"vl:{page + 1}:{sort}:{filter_}"))
+    rows.append(nav)
+
+    def mark(active: bool, label: str) -> str:
+        return ("▫️" if active else "") + label
+
+    rows.append([
+        InlineKeyboardButton(
+            text=mark(sort == "date", "🔽 Дата"),
+            callback_data=f"vl:0:date:{filter_}"),
+        InlineKeyboardButton(
+            text=mark(sort == "score", "🎯 Рейтинг"),
+            callback_data=f"vl:0:score:{filter_}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text=mark(filter_ == "all", "Все"),
+            callback_data=f"vl:0:{sort}:all"),
+        InlineKeyboardButton(
+            text=mark(filter_ == "responded", "✅ Откликнулся"),
+            callback_data=f"vl:0:{sort}:responded"),
+        InlineKeyboardButton(
+            text=mark(filter_ == "pending", "📄 Не откликался"),
+            callback_data=f"vl:0:{sort}:pending"),
+    ])
+    rows.append([InlineKeyboardButton(text="↩️ В настройки", callback_data="settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

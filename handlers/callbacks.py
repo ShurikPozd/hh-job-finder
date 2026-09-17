@@ -1,11 +1,11 @@
 import logging
-import re
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+from formatters import format_detail
 from keyboards import settings_keyboard, bank_keyboard, cancel_keyboard, vacancy_keyboard, hide_confirm_keyboard
 
 log = logging.getLogger("handlers.callbacks")
@@ -14,12 +14,6 @@ router = Router()
 
 class BankFSM(StatesGroup):
     waiting_bank_file = State()
-
-
-def _strip(text: str, limit=1800) -> str:
-    text = re.sub(r"<[^>]+>", " ", text or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text if len(text) <= limit else text[:limit] + "…"
 
 
 # ================= Подробнее =================
@@ -31,26 +25,11 @@ async def cb_detail(call: CallbackQuery):
     if not rec:
         await call.answer("Вакансия не найдена.", show_alert=True)
         return
-    desc = _strip(rec.get("description"), 1500)
-    salary = ""
-    if rec.get("salary_from") or rec.get("salary_to"):
-        cur = rec.get("salary_currency") or "RUR"
-        sign = {"RUR": "₽", "RUB": "₽", "USD": "$", "EUR": "€"}.get(cur, cur)
-        frm, to = rec.get("salary_from"), rec.get("salary_to")
-        salary = f" от {frm}{sign}" if frm and not to else (f" {frm}–{to}{sign}" if frm and to else (f" до {to}{sign}" if to else ""))
-    skills = "🛠 Навыки:\n• " + "\n• ".join((rec.get("key_skills") or [])[:15]) if rec.get("key_skills") else ""
-    accr = "✅ IT-аккредитация" if rec.get("accredited_it") else "❓ Аккредитация не найдена"
-    msg = (
-        f"💼 {rec.get('name')}\n"
-        f"🏢 {rec.get('employer_name')}\n"
-        f"📍 {rec.get('area_name')} · {rec.get('experience_name')}\n"
-        f"💰 ЗП{salary}\n"
-        f"{accr}\n\n"
-        f"Ссылка: {rec.get('url')}\n\n"
-        f"📄 Описание:\n{desc}\n\n"
-        f"{skills}"
+    await call.message.edit_text(
+        format_detail(rec),
+        reply_markup=vacancy_keyboard(vid),
+        disable_web_page_preview=True,
     )
-    await call.message.edit_text(msg, reply_markup=vacancy_keyboard(vid), disable_web_page_preview=True)
     await call.answer()
 
 

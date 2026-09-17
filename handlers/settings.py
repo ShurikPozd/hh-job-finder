@@ -10,6 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 import config
 from db import DEFAULT_PROFILE
 from keyboards import settings_keyboard, bank_keyboard, cancel_keyboard
+from resume_parser import parse_resume_document
 
 log = logging.getLogger("handlers.settings")
 router = Router()
@@ -24,11 +25,17 @@ class SettingsFSM(StatesGroup):
     enter_interval = State()
     enter_bank_file = State()
     enter_profile_text = State()
+    waiting_resume_file = State()
 
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message):
     await message.answer("⚙️ Настройки:", reply_markup=settings_keyboard())
+
+
+@router.message(F.text == "⚙️ Настройки")
+async def btn_settings(message: Message):
+    await cmd_settings(message)
 
 
 @router.callback_query(F.data == "settings")
@@ -102,6 +109,11 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
         await call.message.edit_text(f"Фильтр аккредитации: {status}", reply_markup=settings_keyboard())
     elif action == "bank":
         await call.message.edit_text("📁 Банк профиля:", reply_markup=bank_keyboard())
+    elif action == "vacancies":
+        from handlers.misc import show_vacancy_list
+        await show_vacancy_list(call, 0, "date", "all", edit=True)
+        await call.answer()
+        return
     elif action == "hidden":
         await _list_hidden(call)
     elif action == "hiddenemp":
@@ -117,11 +129,20 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
             f"🛠 Навыки: {', '.join(cur.get('skills') or [])}\n"
             f"📊 Опыт: {cur.get('experience_years')} лет\n"
             f"💰 Зарплата: {cur.get('salary_expectation')}\n\n"
-            "Отправь текстом новый профиль или напиши /start чтобы пересобрать.",
+            "Можно обновить резюме файлом или ввести текст вручную.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="set:profile_edit")],
+                [InlineKeyboardButton(text="📄 Загрузить файл",
+                                      callback_data="set:profile_reupload")],
+                [InlineKeyboardButton(text="✏️ Ввести вручную",
+                                      callback_data="set:profile_edit")],
                 [InlineKeyboardButton(text="↩️ Назад", callback_data="settings")],
             ]),
+        )
+    elif action == "profile_reupload":
+        await state.set_state(SettingsFSM.waiting_resume_file)
+        await call.message.edit_text(
+            "📎 Прикрепи файл резюме (.txt, .docx, .pdf, .doc):",
+            reply_markup=cancel_keyboard(),
         )
     elif action == "profile_edit":
         await state.set_state(SettingsFSM.enter_profile_text)
@@ -223,12 +244,44 @@ async def fsm_interval(message: Message, state: FSMContext):
 
 @router.message(SettingsFSM.enter_profile_text)
 async def fsm_profile(message: Message, state: FSMContext):
-    profile = DEFAULT_PROFILE.copy()
-    profile["about"] = message.text
+    profile = await router.obj.analyzer.parse_resume(message.text)
+    if not profile:
+        profile = DEFAULT_PROFILE.copy()
+        profile["about"] = message.text
+        await message.answer(
+            "⚠️ Не удалось распознать структуру — сохранил как текст. "
+            "Лучше загрузи файл резюме (📄 Загрузить файл)."
+        )
+    else:
+        if profile.get("experience_years", 0) == 0:
+            profile["experience_years"] = 1
     await router.obj.db.upsert_user(message.from_user.id,
                                     profile=json.dumps(profile, ensure_ascii=False))
     await state.clear()
     await message.answer("✅ Профиль обновлён.", reply_markup=settings_keyboard())
+
+
+@router.message(SettingsFSM.waiting_resume_file)
+async def fsm_resume_file(message: Message, state: FSMContext):
+    await message.answer("🤖 Обрабатываю резюме… (может занять ~20 сек)")
+    profile, err = await parse_resume_document(message, router.obj.analyzer)
+    if err:
+        err_text = {
+            "not_doc": "Отправь файл резюме (.txt, .docx, .pdf, .doc).",
+            "ext": "Поддерживаются: .txt, .docx, .pdf, .doc. Попробуй ещё раз.",
+            "read": "Не удалось прочитать файл. Попробуй другой формат.",
+            "short": "Файл пуст или не распознан. Попробуй другой формат (.txt лучше).",
+            "binary": "Не удалось прочитать файл (похоже на бинарный формат). "
+                      "Сохрани как .txt или .docx и попробуй ещё раз.",
+            "parse": "Не удалось извлечь данные. Введи текст вручную.",
+        }
+        await message.answer(err_text.get(err, "Ошибка. Попробуй ещё раз."))
+        return
+    await router.obj.db.upsert_user(message.from_user.id,
+                                    profile=json.dumps(profile, ensure_ascii=False))
+    await state.clear()
+    await message.answer("✅ Резюме обновлено, профиль пересобран.",
+                         reply_markup=settings_keyboard())
 
 
 async def _save_int(message: Message, state: FSMContext, field: str, lo=None, hi=None):

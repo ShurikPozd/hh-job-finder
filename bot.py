@@ -86,12 +86,24 @@ class App:
         from handlers import search as h_search
         from handlers import settings as h_settings
         from handlers import callbacks as h_callbacks
-        for r in (h_start.router, h_search.router, h_settings.router, h_callbacks.router):
+        from handlers import misc as h_misc
+        for r in (h_start.router, h_search.router, h_settings.router,
+                  h_callbacks.router, h_misc.router):
             r.obj = self
             self.dispatcher.include_router(r)
 
         who = await self.bot.get_me()
         log.info("Бот запущен: @%s", who.username)
+
+        from aiogram.types import BotCommand
+        await self.bot.set_my_commands([
+            BotCommand(command="start", description="Приветствие и настройка"),
+            BotCommand(command="search", description="Ручной поиск сейчас"),
+            BotCommand(command="vacancies", description="Присланные вакансии"),
+            BotCommand(command="settings", description="Настройки"),
+            BotCommand(command="status", description="Статус и статистика"),
+            BotCommand(command="help", description="Справка"),
+        ])
 
         from scheduler import start_scheduler
         await start_scheduler(self.db, self.service)

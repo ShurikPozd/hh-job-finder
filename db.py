@@ -106,11 +106,20 @@ class Database:
                 accredited INTEGER DEFAULT 0,
                 checked_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS sent_messages (
+                user_id INTEGER,
+                vacancy_id TEXT,
+                message_id INTEGER,
+                sent_at TEXT,
+                PRIMARY KEY (user_id, vacancy_id)
+            );
             """
         )
         await self._conn.commit()
         await self._ensure_column("users", "only_accredited",
                                   "INTEGER NOT NULL DEFAULT 1")
+        await self._ensure_column("users", "last_search_at", "TEXT")
 
     async def _ensure_column(self, table: str, column: str, ddl: str):
         cur = await self._conn.execute(f"PRAGMA table_info({table})")
@@ -316,6 +325,73 @@ class Database:
             (user_id, vacancy_id),
         )
         await self._conn.commit()
+
+    # ================= sent_messages (история присланного) =================
+
+    async def save_sent_message(self, user_id: int, vacancy_id: str, message_id: int):
+        await self._conn.execute(
+            "INSERT INTO sent_messages (user_id, vacancy_id, message_id, sent_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, vacancy_id) DO UPDATE SET "
+            "message_id = excluded.message_id, sent_at = excluded.sent_at",
+            (user_id, vacancy_id, message_id, utcnow()),
+        )
+        await self._conn.commit()
+
+    async def get_sent_message(self, user_id: int, vacancy_id: str) -> int | None:
+        cur = await self._conn.execute(
+            "SELECT message_id FROM sent_messages WHERE user_id = ? AND vacancy_id = ?",
+            (user_id, vacancy_id),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def list_sent_vacancies(self, user_id: int, page: int = 0,
+                                  page_size: int = 10, sort: str = "date",
+                                  filter_: str = "all") -> dict:
+        """Присланные вакансии (кроме скрытых) с пагинацией.
+        sort: date | score. filter_: all | responded | pending."""
+        where = ["s.user_id = ?"]
+        params: list = [user_id]
+        if filter_ == "responded":
+            where.append("COALESCE(sv.status, '') = 'responded'")
+        elif filter_ == "pending":
+            where.append("COALESCE(sv.status, 'seen') = 'seen'")
+        where.append("COALESCE(sv.status, 'seen') != 'hidden'")
+        where_sql = " AND ".join(where)
+        order = {
+            "date": "s.sent_at DESC",
+            "score": "v.llm_score DESC, s.sent_at DESC",
+        }.get(sort, "s.sent_at DESC")
+        base = (
+            "FROM sent_messages s "
+            "JOIN vacancies v ON v.vacancy_id = s.vacancy_id "
+            "LEFT JOIN seen_vacancies sv "
+            "ON sv.user_id = s.user_id AND sv.vacancy_id = s.vacancy_id "
+            f"WHERE {where_sql}"
+        )
+        cur = await self._conn.execute(f"SELECT COUNT(*) {base}", params)
+        total = (await cur.fetchone())[0]
+        cur = await self._conn.execute(
+            f"SELECT v.*, s.sent_at, COALESCE(sv.status, 'seen') AS status "
+            f"{base} ORDER BY {order} LIMIT ? OFFSET ?",
+            params + [page_size, page * page_size],
+        )
+        rows = await cur.fetchall()
+        return {"items": [dict(r) for r in rows], "total": total}
+
+    async def sent_stats(self, user_id: int) -> dict:
+        cur = await self._conn.execute(
+            "SELECT "
+            "  (SELECT COUNT(*) FROM sent_messages WHERE user_id = ?) AS sent, "
+            "  (SELECT COUNT(*) FROM seen_vacancies WHERE user_id = ? "
+            "    AND status = 'responded') AS responded, "
+            "  (SELECT COUNT(*) FROM seen_vacancies WHERE user_id = ? "
+            "    AND status = 'hidden') AS hidden",
+            (user_id, user_id, user_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else {"sent": 0, "responded": 0, "hidden": 0}
 
     # ================= registry cache =================
 

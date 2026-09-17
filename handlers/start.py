@@ -8,7 +8,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from db import DEFAULT_PROFILE
-from resume_parser import extract_text
+from resume_parser import parse_resume_document
+from keyboards import main_keyboard
 import config
 
 log = logging.getLogger("handlers.start")
@@ -30,11 +31,14 @@ async def cmd_start(message: Message, state: FSMContext):
     user = await router.obj.db.get_user(message.from_user.id)
     if user and user.get("onboarding_done"):
         await message.answer(
-            "Привет! Ты уже настроен. Команды:\n"
+            "Привет! Ты уже настроен. Что делаем?\n\n"
+            "Внизу появилась клавиатура — главные действия на ней.\n"
             "/search — ручной поиск сейчас\n"
+            "/vacancies — уже присланные вакансии\n"
             "/settings — настройки\n"
             "/status — статус\n"
-            "/help — помощь"
+            "/help — помощь",
+            reply_markup=main_keyboard(),
         )
         return
 
@@ -84,7 +88,8 @@ async def _finish(msg, user_id, profile: dict, state: FSMContext):
         "Бот каждые N часов ищет вакансии и присылает подходящие с кнопками.\n"
         "Настройки — /settings. Ручной поиск — /search.\n\n"
         "💡 Совет: в /settings загрузи свой банк профиля или сгенерируй новый "
-        "— сопроводительные станут точнее."
+        "— сопроводительные станут точнее.",
+        reply_markup=main_keyboard(),
     )
     await router.obj.maybe_try_search(user_id)
     router.obj.backup_now()
@@ -92,37 +97,20 @@ async def _finish(msg, user_id, profile: dict, state: FSMContext):
 
 @router.message(Onboarding.waiting_resume)
 async def onb_resume(message: Message, state: FSMContext):
-    if not message.document:
-        return
-    doc = message.document
-    ext = doc.file_name.split(".")[-1].lower()
-    if ext not in ("txt", "docx", "pdf", "doc"):
-        await message.answer("Поддерживаются: .txt, .docx, .pdf, .doc. Попробуй ещё раз.")
-        return
-    try:
-        data = await message.bot.download(doc, destination=None)
-        raw = data.getvalue() if hasattr(data, "getvalue") else data
-        text = extract_text(doc.file_name, raw)
-    except Exception as e:
-        log.exception("Ошибка загрузки резюме")
-        await message.answer("Не удалось прочитать файл. Попробуй другой или заполни вручную.")
-        return
-    if len(text) < 50:
-        await message.answer("Файл пуст или не распознан. Попробуй другой формат (.txt лучше).")
-        return
-    printable = sum(1 for c in text if c.isprintable())
-    if printable / max(len(text), 1) < 0.6:
-        await message.answer("Не удалось прочитать файл (похоже на бинарный формат). "
-                             "Сохрани как .txt или .docx и попробуй ещё раз.")
-        return
-
     await message.answer("🤖 Обрабатываю резюме… (может занять ~20 сек)")
-    profile = await router.obj.analyzer.parse_resume(text)
-    if not profile:
-        await message.answer("Не удалось извлечь данные. Введи вручную (/start → Вручную).")
+    profile, err = await parse_resume_document(message, router.obj.analyzer)
+    if err:
+        err_text = {
+            "not_doc": "Отправь файл резюме (.txt, .docx, .pdf, .doc).",
+            "ext": "Поддерживаются: .txt, .docx, .pdf, .doc. Попробуй ещё раз.",
+            "read": "Не удалось прочитать файл. Попробуй другой или заполни вручную.",
+            "short": "Файл пуст или не распознан. Попробуй другой формат (.txt лучше).",
+            "binary": "Не удалось прочитать файл (похоже на бинарный формат). "
+                      "Сохрани как .txt или .docx и попробуй ещё раз.",
+            "parse": "Не удалось извлечь данные. Введи вручную (/start → Вручную).",
+        }
+        await message.answer(err_text.get(err, "Ошибка. Попробуй ещё раз."))
         return
-    if profile.get("experience_years", 0) == 0:
-        profile["experience_years"] = 1  # пет-проекты засчитываются как ~1 год
 
     await _finish(message, message.from_user.id, profile, state)
 

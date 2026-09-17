@@ -8,7 +8,8 @@ from aiogram import Bot, types
 
 import config
 from analyzer import Analyzer
-from db import Database
+from db import Database, utcnow
+from formatters import format_card
 from hh_client import HHClient, extract_inn, text_has_accreditation
 from keyboards import vacancy_keyboard
 from registry import RegistryChecker
@@ -99,6 +100,7 @@ class VacancyService:
             else:
                 await self.db.mark_seen(user_id, vid, "seen")
 
+        await self.db.upsert_user(user_id, last_search_at=utcnow())
         return {"found": len(fetched), "sent": sent}
 
     # ============ Сборка записи о вакансии ============
@@ -177,46 +179,16 @@ class VacancyService:
     async def _send_vacancy(self, user_id: int, rec: dict) -> None:
         text = self.format_vacancy(rec)
         try:
-            await self.bot.send_message(
+            msg = await self.bot.send_message(
                 user_id, text, reply_markup=vacancy_keyboard(rec["vacancy_id"]),
                 disable_web_page_preview=True,
             )
+            await self.db.save_sent_message(user_id, rec["vacancy_id"], msg.message_id)
         except Exception as e:
             log.warning("Не удалось отправить %s: %s", rec["vacancy_id"], e)
 
     def format_vacancy(self, rec: dict) -> str:
-        score = int(rec.get("llm_score", 0) or 0)
-        score = max(0, min(10, score))
-        bar = "█" * score + "░" * (10 - score)
-        accr = "✅ IT-аккредитация" if rec.get("accredited_it") else "❓ Аккредитация не найдена"
-        if rec.get("accreditation_source"):
-            accr += f"\n   источники: {rec.get('accreditation_source')}"
-        salary = rec.get("salary_text") or "не указана"
-        skills = rec.get("key_skills") or []
-        if isinstance(skills, str):
-            skills = json.loads(skills) if skills else []
-        skills_str = ", ".join(skills[:10]) if skills else "—"
-        sd = rec.get("score_data") or {}
-
-        lines = [
-            f"💼 {rec.get('name')}",
-            f"🏢 {rec.get('employer_name') or '—'}",
-            f"📍 {rec.get('area_name') or '—'} · {rec.get('experience_name') or '—'}",
-            f"💰 {salary}",
-            f"🛠 {skills_str}",
-            f"   {accr}",
-            f"",
-            f"Соответствие: {bar} {score}/10",
-        ]
-        if sd.get("summary"):
-            lines.append(f"   {sd['summary']}")
-        if sd.get("missing_skills"):
-            lines.append(f"⚠️ Не хватает: {', '.join(sd['missing_skills'][:5])}")
-        if sd.get("risk"):
-            lines.append(f"🎯 Риск: {sd['risk']}")
-        lines.append("")
-        lines.append(f"🗓 Прогнозируемый {config.GROQ_MODEL.split('/')[-1]}")
-        return "\n".join(lines)
+        return format_card(rec)
 
     # ============ Вспомогательные ============
 

@@ -164,7 +164,14 @@ class HHClient:
         soup = self._soup(html)
         title = _text(soup.select_one('[data-qa="vacancy-title"]'))
         desc_el = soup.select_one('[data-qa="vacancy-description"]')
-        desc = desc_el.get_text(" ", strip=True) if desc_el else None
+        desc = None
+        if desc_el:
+            # сохраняем переносы абзацев/списков, а не схлопываем всё в одну строку
+            for tag in desc_el.find_all(["p", "div", "li", "ul", "ol", "br"]):
+                tag.insert_after("\n")
+            desc = desc_el.get_text(" ", strip=True)
+            desc = re.sub(r"[ \t]+", " ", desc).replace(" \n", "\n").replace("\n ", "\n")
+            desc = re.sub(r"\n{3,}", "\n\n", desc).strip() or None
         emp_el = soup.select_one('a[data-qa="vacancy-company-name"]')
         salary = None
         for sel in ('[data-qa="vacancy-salary-compensation-type-net"]',

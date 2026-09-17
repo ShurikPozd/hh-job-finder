@@ -30,6 +30,11 @@ async def cmd_search(message: Message):
         await message.answer("⏳ Поиск уже выполняется, подожди чуть-чуть.")
 
 
+@router.message(F.text == "🔍 Поиск")
+async def btn_search(message: Message):
+    await cmd_search(message)
+
+
 @router.message(F.text.startswith("/v "))
 async def cmd_vacancy(message: Message):
     parts = message.text.split()
