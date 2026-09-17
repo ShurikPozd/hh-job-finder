@@ -114,6 +114,15 @@ class Database:
                 sent_at TEXT,
                 PRIMARY KEY (user_id, vacancy_id)
             );
+
+            CREATE TABLE IF NOT EXISTS llm_usage (
+                day TEXT,               -- UTC-дата YYYY-MM-DD
+                model TEXT,
+                calls INTEGER DEFAULT 0,
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                PRIMARY KEY (day, model)
+            );
             """
         )
         await self._conn.commit()
@@ -392,6 +401,65 @@ class Database:
         )
         row = await cur.fetchone()
         return dict(row) if row else {"sent": 0, "responded": 0, "hidden": 0}
+
+    # ================= Учёт использования LLM =================
+
+    async def add_llm_usage(self, model: str, prompt_tokens: int,
+                            completion_tokens: int):
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await self._conn.execute(
+            "INSERT INTO llm_usage (day, model, calls, prompt_tokens, completion_tokens) "
+            "VALUES (?, ?, 1, ?, ?) "
+            "ON CONFLICT(day, model) DO UPDATE SET "
+            "  calls = calls + 1, "
+            "  prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
+            "  completion_tokens = completion_tokens + excluded.completion_tokens",
+            (day, model, int(prompt_tokens or 0), int(completion_tokens or 0)),
+        )
+        await self._conn.commit()
+
+    async def llm_usage_today(self) -> dict:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cur = await self._conn.execute(
+            "SELECT model, calls, prompt_tokens, completion_tokens FROM llm_usage "
+            "WHERE day = ? ORDER BY model", (day,),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        return {
+            "day": day,
+            "models": rows,
+            "calls": sum(r["calls"] for r in rows),
+            "tokens": sum(r["prompt_tokens"] + r["completion_tokens"] for r in rows),
+        }
+
+    async def llm_calls_today(self, models: list[str] | None = None) -> int:
+        """Сколько LLM-вызовов уже сделано сегодня (для бюджета прогона)."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if models:
+            q = ",".join("?" * len(models))
+            cur = await self._conn.execute(
+                f"SELECT COALESCE(SUM(calls), 0) c FROM llm_usage "
+                f"WHERE day = ? AND model IN ({q})", (day, *models))
+        else:
+            cur = await self._conn.execute(
+                "SELECT COALESCE(SUM(calls), 0) c FROM llm_usage WHERE day = ?", (day,))
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def llm_tokens_today(self, models: list[str] | None = None) -> int:
+        """Потрачено токенов (вход+выход) сегодня — основа бюджета скоринга."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if models:
+            q = ",".join("?" * len(models))
+            cur = await self._conn.execute(
+                f"SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) t "
+                f"FROM llm_usage WHERE day = ? AND model IN ({q})", (day, *models))
+        else:
+            cur = await self._conn.execute(
+                "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) t "
+                "FROM llm_usage WHERE day = ?", (day,))
+        row = await cur.fetchone()
+        return int(row["t"]) if row else 0
 
     # ================= registry cache =================
 

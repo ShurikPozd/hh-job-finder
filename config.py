@@ -17,13 +17,29 @@ def _normalize_groq_model(name: str) -> str:
 
 
 GROQ_MODEL = _normalize_groq_model(os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"))
-# Парсинг резюме (длинный вход): у qwen лимит 8000 TPM, у compound-mini — 70000.
-# Отдельная модель, чтобы не упираться в лимит на больших резюме.
+# Парсинг резюме (длинный вход): редкая операция (~9k токенов на резюме),
+# поэтому держим его на compound-mini и не тратим пул qwen.
 GROQ_PARSE_MODEL = os.getenv("GROQ_PARSE_MODEL", "groq/compound-mini").strip()
+# Модель скоринга вакансий (главный потребитель квоты). Пусто = GROQ_MODEL.
+# qwen: 200k токенов/день; compound-mini работает на llama-3.3-70b-versatile
+# с лимитом всего 100k/день — поэтому он только резерв.
+GROQ_SCORE_MODEL = _normalize_groq_model(
+    os.getenv("GROQ_SCORE_MODEL", "qwen/qwen3.8-27b").strip())
 GROQ_TIMEOUT_SEC = int(os.getenv("GROQ_TIMEOUT_SEC") or 45)
-# Бесплатный тир Groq: ~1000 output-токенов/мин — режем max_tokens,
-# чтобы успевало несколько вызовов в минуту
+# Бесплатный тир Groq: 1000 output-токенов/мин (OTPM) на qwen, и лимитер
+# резервирует запрошенный max_tokens — поэтому держим его маленьким.
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS") or 600)
+GROQ_SCORE_MAX_TOKENS = int(os.getenv("GROQ_SCORE_MAX_TOKENS") or 400)
+GROQ_LETTER_MAX_TOKENS = int(os.getenv("GROQ_LETTER_MAX_TOKENS") or 800)
+GROQ_BANK_MAX_TOKENS = int(os.getenv("GROQ_BANK_MAX_TOKENS") or 2500)
+
+# ===== Бюджет LLM =====
+# Оценка стоимости одной вакансии (вход+выход) для планирования прогона.
+SCORE_EST_TOKENS = int(os.getenv("SCORE_EST_TOKENS") or 1500)
+# Бюджеты на прогон и на сутки. Общий пул qwen (200k/день) делят также
+# tg-saver и расширение пользователя — берём только часть.
+SCORE_TOKEN_BUDGET_PER_RUN = int(os.getenv("SCORE_TOKEN_BUDGET_PER_RUN") or 6000)
+SCORE_TOKEN_BUDGET_PER_DAY = int(os.getenv("SCORE_TOKEN_BUDGET_PER_DAY") or 60000)
 
 # ===== БД =====
 DB_PATH = os.getenv("DB_PATH", os.path.join("data", "hh_job_finder.db"))

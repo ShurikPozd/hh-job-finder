@@ -49,6 +49,25 @@ GROQ_PARSE_CALL_GAP_SEC = 5.0  # compound: 70000 TPM — лимит не меш�
 RESUME_CHUNK_CHARS = 8000
 RESUME_MAX_CHUNKS = 3
 
+# Куда писать расход токенов: async callable(model, prompt_tokens, completion_tokens)
+_usage_hook = None
+
+
+def set_usage_hook(fn):
+    global _usage_hook
+    _usage_hook = fn
+
+
+async def _record_usage(model: str, usage: dict | None):
+    if _usage_hook is None:
+        return
+    usage = usage or {}
+    try:
+        await _usage_hook(model, usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0))
+    except Exception as e:  # учёт не должен ломать основную работу
+        log.warning("Не записал llm_usage: %s", e)
+
 
 async def _post_groq(system: str, user: str, temperature: float = 0.3,
                      retries: int = 5, max_tokens: int | None = None,
@@ -87,7 +106,8 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                     proxies=proxies, timeout=config.GROQ_TIMEOUT_SEC,
                 )
                 resp.raise_for_status()
-                choice = resp.json()["choices"][0]
+                body = resp.json()
+                choice = body["choices"][0]
                 content = choice["message"]["content"]
                 if json_mode and choice.get("finish_reason") == "length":
                     # JSON обрезан — модели не хватило max_tokens (часто из-за
@@ -102,6 +122,7 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                         await asyncio.sleep(wait)
                         continue
                     raise RuntimeError("Groq вернул пустой ответ")
+                await _record_usage(model, body.get("usage"))
                 _groq_next_call[model] = time.monotonic() + gap
                 return content
             except (requests.exceptions.ConnectionError,
@@ -109,10 +130,16 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                     requests.exceptions.SSLError) as e:
                 # Прокси/TLS может сброситься разово — сначала мгновенно дублируем
                 # через curl (другой TLS-стек), затем пауза и повтор requests.
-                content = await asyncio.to_thread(_post_curl_sync, url, headers, payload)
-                if content is not None:
-                    _groq_next_call[model] = time.monotonic() + gap
-                    return content
+                body = await asyncio.to_thread(_post_curl_sync, url, headers, payload)
+                if body is not None:
+                    choice = body["choices"][0]
+                    content = choice["message"]["content"]
+                    if json_mode and choice.get("finish_reason") == "length":
+                        raise RuntimeError("Groq обрезал JSON (curl)")
+                    if (content or "").strip():
+                        await _record_usage(model, body.get("usage"))
+                        _groq_next_call[model] = time.monotonic() + gap
+                        return content
                 if attempt < retries:
                     wait = min(2 ** attempt, 30)
                     log.warning("Groq сеть (попытка %s/%s): %s, сон %ss",
@@ -134,8 +161,9 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
         raise RuntimeError("Groq не ответил после всех попыток")
 
 
-def _post_curl_sync(url: str, headers: dict, payload: dict, timeout: int | None = None) -> str | None:
-    """Обходной путь через curl.exe и SOCKS-прокси — переживает сброс TLS/SSLEOF."""
+def _post_curl_sync(url: str, headers: dict, payload: dict, timeout: int | None = None) -> dict | None:
+    """Обходной путь через curl.exe и SOCKS-прокси — переживает сброс TLS/SSLEOF.
+    Возвращает разобранный JSON-ответ (вместе с usage)."""
     import subprocess, tempfile, os as _os
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -160,7 +188,11 @@ def _post_curl_sync(url: str, headers: dict, payload: dict, timeout: int | None 
         body, _, status_s = out.rpartition(b"\n")
         status = int(status_s) if status_s.isdigit() else 0
         if status == 200 and body:
-            return body.decode("utf-8", errors="replace")
+            try:
+                return json.loads(body.decode("utf-8", errors="replace"))
+            except (ValueError, UnicodeDecodeError) as e:
+                log.warning("Groq curl: не разобрал JSON (%s)", e)
+                return None
         if status == 429:
             log.warning("Groq curl 429")
         elif status:
@@ -200,9 +232,32 @@ def _extract_json(text: str) -> dict:
     return best
 
 
+def _letter_text(text: str) -> str:
+    """Текст сопроводительного. Просим модель писать обычным текстом, но если
+    она всё же обернула его в JSON или ```-фенс — аккуратно достаём."""
+    out = (text or "").strip()
+    if out.startswith("{"):
+        try:
+            data = _extract_json(out)
+            for key in ("letter", "cover_letter", "text", "body"):
+                val = data.get(key)
+                if isinstance(val, str) and val.strip():
+                    out = val.strip()
+                    break
+        except ValueError:
+            pass
+    if out.startswith("```"):
+        out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
+        out = re.sub(r"\s*```$", "", out)
+    return out.strip()
+
+
 class Analyzer:
-    async def score_vacancy(self, vacancy: dict, profile: dict) -> dict:
-        """0-10 скоринг соответствия вакансии профилю."""
+    async def score_vacancy(self, vacancy: dict, profile: dict) -> dict | None:
+        """0-10 скоринг соответствия вакансии профилю.
+
+        None — если оценить не удалось (сеть/квота). Вызывающий НЕ должен
+        считать это «не подошло»: вакансию нужно переоценить в следующий раз."""
         system = (
             "Ты — рекрутер, оцениваешь соответствие вакансии профилю кандидата "
             "для junior Python/QA разработчика."
@@ -218,26 +273,37 @@ class Analyzer:
             },
             "candidate_profile": {
                 "title": profile.get("title"),
-                "skills": profile.get("skills", []),
+                # Профиль дублируется в каждом вызове — режем, чтобы влезать
+                # в суточную free-квоту; описание вакансии не трогаем
+                "skills": (profile.get("skills") or [])[:25],
                 "experience_years": profile.get("experience_years", 0),
-                "about": profile.get("about", ""),
+                "about": (profile.get("about") or "")[:600],
                 "projects": profile.get("projects", []),
             },
         }, ensure_ascii=False)
-        try:
-            out = await _post_groq(system, user)
-            data = _extract_json(out)
-            return {
-                "score": max(0, min(10, int(data.get("score", 0)))),
-                "summary": data.get("summary", ""),
-                "missing_skills": data.get("missing_skills", []),
-                "matched_skills": data.get("matched_skills", []),
-                "risk": data.get("risk", "low"),
-            }
-        except Exception as e:
-            log.exception("Ошибка скоринга")
-            return {"score": 0, "summary": "", "missing_skills": [],
-                    "matched_skills": [], "risk": "unknown"}
+
+        models: list[str] = []
+        for m in (config.GROQ_SCORE_MODEL, config.GROQ_MODEL):
+            if m and m not in models:
+                models.append(m)
+        for model in models:
+            try:
+                out = await _post_groq(system, user,
+                                       max_tokens=config.GROQ_SCORE_MAX_TOKENS,
+                                       model=model)
+                data = _extract_json(out)
+                return {
+                    "score": max(0, min(10, int(_num(data.get("score"))))),
+                    "summary": data.get("summary", ""),
+                    "missing_skills": data.get("missing_skills", []),
+                    "matched_skills": data.get("matched_skills", []),
+                    "risk": data.get("risk", "low"),
+                }
+            except Exception as e:
+                log.warning("Скоринг моделью %s не удался: %s", model, e)
+        log.error("Скоринг вакансии %s не удался всеми моделями",
+                  vacancy.get("vacancy_id"))
+        return None
 
     async def generate_cover_letter(self, vacancy: dict, profile: dict, bank: str | None) -> str:
         """Сопроводительное из банка или шаблона."""
@@ -267,13 +333,22 @@ class Analyzer:
             "candidate_profile": profile,
             "profile_bank": bank_ref,
         }, ensure_ascii=False)
-        try:
-            out = await _post_groq(system, user, 0.5)
-            data = _extract_json(out)
-            return data.get("letter", data.get("cover_letter", out))
-        except Exception as e:
-            log.exception("Ошибка генерации письма")
-            return "Не удалось сгенерировать письмо. Попробуйте позже."
+        models: list[str] = []
+        for m in (config.GROQ_SCORE_MODEL, config.GROQ_MODEL):
+            if m and m not in models:
+                models.append(m)
+        last_err = None
+        for model in models:
+            try:
+                out = await _post_groq(system, user, 0.5,
+                                       max_tokens=config.GROQ_LETTER_MAX_TOKENS,
+                                       model=model)
+                return _letter_text(out)
+            except Exception as e:
+                last_err = e
+                log.warning("Письмо моделью %s не удалось: %s", model, e)
+        log.exception("Ошибка генерации письма: %s", last_err)
+        return "Не удалось сгенерировать письмо. Попробуйте позже."
 
     async def generate_bank(self, profile: dict) -> str:
         """Генерация банка профиля по данным пользователя."""
@@ -286,7 +361,8 @@ class Analyzer:
         )
         user = json.dumps(profile, ensure_ascii=False)
         try:
-            out = await _post_groq(system, user)
+            out = await _post_groq(system, user,
+                                   max_tokens=config.GROQ_BANK_MAX_TOKENS)
             data = _extract_json(out)
             return data.get("bank", BANK_TEMPLATE.format(
                 name=profile.get("name", "Кандидат"),

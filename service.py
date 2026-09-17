@@ -7,7 +7,7 @@ from datetime import datetime
 from aiogram import Bot, types
 
 import config
-from analyzer import Analyzer
+from analyzer import Analyzer, set_usage_hook
 from db import Database, utcnow
 from formatters import format_card
 from hh_client import HHClient, extract_inn, text_has_accreditation
@@ -23,6 +23,7 @@ class VacancyService:
         self.bot = bot
         self.hh = HHClient()
         self.analyzer = Analyzer()
+        set_usage_hook(db.add_llm_usage)
         self.registry = RegistryChecker(db)
 
     # ============ Пайплайн поиска ============
@@ -67,16 +68,34 @@ class VacancyService:
 
         log.info("Найдено %d вакансий для user %s", len(fetched), user_id)
 
+        # Бюджет скоринга в токенах: не жжём free-квоту (её делят tg-saver и
+        # расширение пользователя) и не теряем вакансии — что не успели оценить,
+        # останется необработанным и попадёт в следующий прогон
+        score_models = [m for m in (config.GROQ_SCORE_MODEL, config.GROQ_MODEL) if m]
+        day_used = await self.db.llm_tokens_today(score_models)
+        est = config.SCORE_EST_TOKENS
+        budget = min(
+            config.SCORE_TOKEN_BUDGET_PER_RUN,
+            max(0, config.SCORE_TOKEN_BUDGET_PER_DAY - day_used),
+        )
+
         sent = 0
+        scored = 0
+        deferred = 0
+        spent_total = 0
         collected: list[dict] = []
         for item in fetched:
             vid = str(item["id"])
             if await self.db.is_seen(user_id, vid):
                 continue
+            if budget < est:
+                deferred += 1
+                continue
             try:
                 detail = await self.hh.get_vacancy(vid)
             except Exception as e:
                 log.warning("Ошибка деталей %s: %s", vid, e)
+                deferred += 1
                 continue
 
             employer_id = self._emp_id(detail.get("employer_href"))
@@ -85,15 +104,32 @@ class VacancyService:
                 continue
 
             profile = json.loads(user["profile"] or "{}")
-            rec = await self._build_record(item, detail, profile)
+            rec = await self._collect_record(item, detail)
             rec["employer_id"] = employer_id
 
+            # Жёсткий фильтр ДО LLM: не платим за то, что всё равно выбросим
+            accredited_only = user.get("only_accredited", 1)
+            if accredited_only and not rec.get("accredited_it"):
+                await self.db.mark_seen(user_id, vid, "seen")
+                log.info("Фильтр: %s отброшена (нет аккредитации)", vid)
+                continue
+
+            spent_before = await self.db.llm_tokens_today(score_models)
+            score_data = await self.analyzer.score_vacancy(rec, profile)
+            spent = max(0, (await self.db.llm_tokens_today(score_models)) - spent_before)
+            spent_total += spent
+            budget -= spent
+            if score_data is None:
+                # Квота/сеть: НЕ помечаем seen, переоценим в следующий прогон
+                deferred += 1
+                continue
+            scored += 1
+            rec["score"] = score_data["score"]
+            rec["llm_score"] = score_data["score"]
+            rec["llm_summary"] = score_data.get("summary", "")
+            rec["score_data"] = score_data
+
             if rec.get("score", 0) >= threshold:
-                accredited_only = user.get("only_accredited", 1)
-                if accredited_only and not rec.get("accredited_it"):
-                    await self.db.mark_seen(user_id, vid, "seen")
-                    log.info("Фильтр: %s отброшена (нет аккредитации)", vid)
-                    continue
                 await self.db.upsert_vacancy(rec)
                 await self.db.mark_seen(user_id, vid, "seen")
                 if top_n is not None:
@@ -113,11 +149,18 @@ class VacancyService:
                 sent += 1
 
         await self.db.upsert_user(user_id, last_search_at=utcnow())
-        return {"found": len(fetched), "sent": sent}
+        if deferred:
+            log.warning("Отложено (квота/сбой): %d вакансий; токенов за прогон %d, "
+                        "лимит дня %d (осталось ~%d)",
+                        deferred, spent_total, config.SCORE_TOKEN_BUDGET_PER_DAY,
+                        max(0, int(budget)))
+        return {"found": len(fetched), "scored": scored, "sent": sent,
+                "deferred": deferred, "tokens": spent_total}
 
     # ============ Сборка записи о вакансии ============
 
-    async def _build_record(self, item: dict, detail: dict, profile: dict) -> dict:
+    async def _collect_record(self, item: dict, detail: dict) -> dict:
+        """Данные о вакансии + аккредитация БЕЗ обращения к LLM."""
         vid = str(detail["id"])
         sources = {}
 
@@ -171,12 +214,6 @@ class VacancyService:
             "accredited_it": 1 if accredited else 0,
             "accreditation_source": source_str,
         }
-
-        score_data = await self.analyzer.score_vacancy(record, profile)
-        record["score"] = score_data["score"]
-        record["llm_score"] = score_data["score"]
-        record["llm_summary"] = score_data.get("summary", "")
-        record["score_data"] = score_data
         return record
 
     @staticmethod

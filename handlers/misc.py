@@ -42,6 +42,7 @@ async def cmd_status(message: Message):
     profile = json.loads(user.get("profile") or "{}")
     bank = "✅ загружен" if user.get("profile_bank") else "— не загружен"
     stats = await router.obj.db.sent_stats(user_id)
+    usage = await router.obj.db.llm_usage_today()
     last_search = user.get("last_search_at") or "ещё не было"
     skills = skills_line(profile.get("skills"), limit=20)
     lines = [
@@ -60,7 +61,11 @@ async def cmd_status(message: Message):
         f"🚫 Скрыто: {stats['hidden']}",
         f"🕐 Последний поиск: {last_search}",
         f"⏳ Идёт поиск сейчас: {'да' if router.obj.is_searching(user_id) else 'нет'}",
+        f"🔌 LLM сегодня: {usage['calls']} вызовов · {usage['tokens']} токенов",
     ]
+    if usage["models"]:
+        lines.append("   " + " · ".join(
+            f"{m['model'].split('/')[-1]}: {m['calls']}" for m in usage["models"]))
     await message.answer("\n".join(lines))
 
 

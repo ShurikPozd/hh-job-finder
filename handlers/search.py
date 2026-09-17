@@ -21,12 +21,18 @@ async def cmd_search(message: Message):
     if not router.obj.is_searching(user_id):
         await message.answer("🔍 Ищу вакансии… может занять 30–120 сек.")
         result = await router.obj.service.run_search(user_id, silent=False, top_n=5)
-        await message.answer(
+        text = (
             f"🔍 Найдено вакансий: {result['found']}\n"
+            f"🤖 Оценено: {result['scored']}\n"
             f"✅ Показано лучших: {result['sent']}\n"
-            f"Остальные — ниже порога соответствия.\n"
-            f"Всё, что когда-либо присылал бот, — в /vacancies."
         )
+        if result.get("deferred"):
+            text += (f"⏳ Отложено из-за лимита LLM: {result['deferred']} "
+                     f"— оценю в следующий поиск.\n")
+        if result["scored"] > result["sent"]:
+            text += "Остальные — ниже порога соответствия.\n"
+        text += "Всё, что когда-либо присылал бот, — в /vacancies."
+        await message.answer(text)
     else:
         await message.answer("⏳ Поиск уже выполняется, подожди чуть-чуть.")
 
