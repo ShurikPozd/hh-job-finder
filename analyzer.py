@@ -76,8 +76,18 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                     proxies=proxies, timeout=config.GROQ_TIMEOUT_SEC,
                 )
                 resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+                if not (content or "").strip():
+                    # Groq-модель иногда отдаёт пустой content без ошибки
+                    if attempt < retries:
+                        wait = min(2 ** attempt, 15)
+                        log.warning("Groq пустой ответ (попытка %s/%s), сон %ss",
+                                    attempt, retries, wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    raise RuntimeError("Groq вернул пустой ответ")
                 _groq_next_call = time.monotonic() + GROQ_CALL_GAP_SEC
-                return resp.json()["choices"][0]["message"]["content"]
+                return content
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.ProxyError,
                     requests.exceptions.SSLError) as e:
@@ -96,7 +106,11 @@ async def _post_groq(system: str, user: str, temperature: float = 0.3,
                 raise
             except requests.exceptions.HTTPError as e:
                 if e.response is not None and e.response.status_code == 429 and attempt < retries:
-                    wait = min(2 ** attempt, 60)
+                    # Уважаем Retry-After: при лимите токенов/мин пауза может быть 15-60с
+                    ra = str(e.response.headers.get("Retry-After")
+                             or e.response.headers.get("retry-after") or "")
+                    wait = int(ra) + 2 if ra.isdigit() else min(2 ** attempt, 60)
+                    wait = min(wait, 90)
                     log.warning("Groq 429 (попытка %s/%s), сон %ss", attempt, retries, wait)
                     await asyncio.sleep(wait)
                     continue
@@ -147,22 +161,27 @@ def _post_curl_sync(url: str, headers: dict, payload: dict, timeout: int | None 
 
 
 def _extract_json(text: str) -> dict:
-    """Достать JSON-объект из ответа модели (может быть обёрнут в thinking/fence)."""
+    """Достать JSON-объект из ответа модели (обёрнут в thinking/fence).
+
+    Среди всех `{...}` берём объект с наибольшим числом ключей: у qwen
+    projects часто массив объектов, и «последний» `{` — это вложенный проект,
+    а не итоговый профиль/скоринг."""
     text = text or ""
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    # qwen-модели любят выдавать "thinking..." перед ответом — берём ПОСЛЕДНИЙ JSON
-    # (в thinking-блоке скобки могут попадаться, но финальный ответ — последний)
-    candidates = list(re.finditer(r"\{", text))
-    for m in reversed(candidates):
+    decoder = json.JSONDecoder()
+    best: dict | None = None
+    for m in re.finditer(r"\{", text):
         try:
-            data, _ = json.JSONDecoder().raw_decode(text[m.start():])
-            if isinstance(data, dict):
-                return data
+            data, _ = decoder.raw_decode(text[m.start():])
         except Exception:
             continue
-    raise ValueError("JSON не найден в ответе модели")
+        if isinstance(data, dict) and (best is None or len(data) > len(best)):
+            best = data
+    if best is None:
+        raise ValueError("JSON не найден в ответе модели")
+    return best
 
 
 class Analyzer:
@@ -279,9 +298,13 @@ class Analyzer:
             '"education","city","salary_expectation","about","projects":[]} '
             "Опыт указывай с округлением, например 1.5."
         )
+        # Лимит Groq free ~8000 токенов/мин: сжимаем пробелы и режем текст,
+        # иначе резюме не влезает и приходит 429
+        compact = re.sub(r"[ \t]+", " ", text or "").strip()
+        compact = re.sub(r"\n{3,}", "\n\n", compact)[:7000]
         for attempt in (1, 2):
             try:
-                out = await _post_groq(system, text[:16000], max_tokens=2200)
+                out = await _post_groq(system, compact, max_tokens=1200)
                 data = _extract_json(out)
                 skills = data.get("skills", [])
                 if isinstance(skills, str):
@@ -301,10 +324,10 @@ class Analyzer:
                     "about": data.get("about", ""),
                     "projects": projects,
                 }
-                # Пустой ответ модели считаем сбоем — уходим на повтор
-                if not (profile["name"] or profile["title"] or profile["skills"]
-                        or profile["about"]):
-                    raise ValueError("ответ модели пуст")
+                # Мусорный/пустой ответ (например, вложенный объект проекта) —
+                # уходим на повтор
+                if not (profile["skills"] or profile["about"]):
+                    raise ValueError("ответ модели пуст или неполон")
                 return profile
             except Exception as e:
                 if attempt == 1:
