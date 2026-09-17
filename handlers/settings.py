@@ -141,7 +141,7 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
     elif action == "profile_reupload":
         await state.set_state(SettingsFSM.waiting_resume_file)
         await call.message.edit_text(
-            "📎 Прикрепи файл резюме (.txt, .docx, .pdf, .doc):",
+            "📎 Прикрепи файл резюме (.txt, .docx, .pdf, .doc, .rtf):",
             reply_markup=cancel_keyboard(),
         )
     elif action == "profile_edit":
@@ -268,7 +268,7 @@ async def fsm_resume_file(message: Message, state: FSMContext):
     if err:
         err_text = {
             "not_doc": "Отправь файл резюме (.txt, .docx, .pdf, .doc).",
-            "ext": "Поддерживаются: .txt, .docx, .pdf, .doc. Попробуй ещё раз.",
+            "ext": "Поддерживаются: .txt, .docx, .pdf, .doc, .rtf. Попробуй ещё раз.",
             "read": "Не удалось прочитать файл. Попробуй другой формат.",
             "short": "Файл пуст или не распознан. Попробуй другой формат (.txt лучше).",
             "binary": "Не удалось прочитать файл (похоже на бинарный формат). "

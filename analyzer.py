@@ -218,27 +218,32 @@ class Analyzer:
             '"education","city","salary_expectation","about","projects":[]} '
             "Опыт указывай с округлением, например 1.5."
         )
-        try:
-            out = await _post_groq(system, text[:16000], max_tokens=2200)
-            data = _extract_json(out)
-            skills = data.get("skills", [])
-            if isinstance(skills, str):
-                skills = [s.strip() for s in skills.split(",") if s.strip()]
-            projects = data.get("projects", [])
-            if isinstance(projects, str):
-                projects = [p.strip() for p in projects.split(";") if p.strip()]
-            return {
-                "name": data.get("name", ""),
-                "title": data.get("title", ""),
-                "skills": skills,
-                "experience_years": float(data.get("experience_years", 0) or 0),
-                "languages": data.get("languages", []),
-                "education": data.get("education", ""),
-                "city": data.get("city", ""),
-                "salary_expectation": int(data.get("salary_expectation", 0) or 0),
-                "about": data.get("about", ""),
-                "projects": projects,
-            }
-        except Exception as e:
-            log.exception("Ошибка парсинга резюме")
-            return {}
+        for attempt in (1, 2):
+            try:
+                out = await _post_groq(system, text[:16000], max_tokens=2200)
+                data = _extract_json(out)
+                skills = data.get("skills", [])
+                if isinstance(skills, str):
+                    skills = [s.strip() for s in skills.split(",") if s.strip()]
+                projects = data.get("projects", [])
+                if isinstance(projects, str):
+                    projects = [p.strip() for p in projects.split(";") if p.strip()]
+                return {
+                    "name": data.get("name", ""),
+                    "title": data.get("title", ""),
+                    "skills": skills,
+                    "experience_years": float(data.get("experience_years", 0) or 0),
+                    "languages": data.get("languages", []),
+                    "education": data.get("education", ""),
+                    "city": data.get("city", ""),
+                    "salary_expectation": int(data.get("salary_expectation", 0) or 0),
+                    "about": data.get("about", ""),
+                    "projects": projects,
+                }
+            except Exception as e:
+                if attempt == 1:
+                    log.warning("Парсинг резюме не удался, повтор: %s", e)
+                    await asyncio.sleep(3)
+                    continue
+                log.exception("Ошибка парсинга резюме")
+                return {}

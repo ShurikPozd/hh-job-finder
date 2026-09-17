@@ -7,8 +7,13 @@ log = logging.getLogger("resume_parser")
 
 
 def extract_text(filename: str, data: bytes) -> str:
-    """Извлечь текст из файла .txt/.docx/.pdf/.doc (fallback)."""
+    """Извлечь текст из файла .txt/.docx/.pdf/.doc/.rtf (fallback).
+
+    RTF распознаётся по магии `{\\rtf` — покрывает .rtf и .doc,
+    который на деле является RTF (старые экспорты Word)."""
     name = (filename or "").lower()
+    if data[:8].lstrip().startswith(b"{\\rtf") or name.endswith(".rtf"):
+        return _from_rtf(data)
     try:
         if name.endswith(".txt"):
             return data.decode("utf-8", errors="replace")
@@ -21,11 +26,11 @@ def extract_text(filename: str, data: bytes) -> str:
     except Exception as e:
         log.warning("Не удалось распарсить %s: %s", filename, e)
 
-    # Дальше — попытки выжать хоть что-то
+    # Дальше — попытки выжать хоть что-то (только если похоже на резюме)
     for enc in ("utf-8", "cp1251", "latin1"):
         try:
             text = data.decode(enc)
-            if len(text) > 50:
+            if len(text) > 50 and _cyrillic_ok(text):
                 return text
         except UnicodeDecodeError:
             continue
@@ -51,6 +56,36 @@ def _from_pdf(data: bytes) -> str:
     return "\n".join(page.get_text() for page in doc)
 
 
+def _from_rtf(data: bytes) -> str:
+    """RTF → текст (кодировка из заголовка ansicpg, у парсера striprtf)."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+    except Exception:
+        rtf_to_text = None
+    head = data[:400].decode("latin1", errors="ignore")
+    cpg = re.search(r"\\ansicpg(\d+)", head)
+    encoding = f"cp{cpg.group(1)}" if cpg else "cp1251"
+    try:
+        text = data.decode(encoding)
+    except UnicodeDecodeError:
+        text = data.decode("latin1", errors="replace")
+    if rtf_to_text:
+        try:
+            cleaned = rtf_to_text(text)
+            if len(cleaned) > 50:
+                return cleaned
+        except Exception as e:
+            log.warning("striprtf не справился: %s", e)
+    return text
+
+
+def _cyrillic_ok(text: str) -> bool:
+    """Есть ли в тексте заметная доля кириллицы (резюме на русском)."""
+    total = sum(1 for c in text if c.isprintable())
+    cyr = sum(1 for c in text if "а" <= c.lower() <= "я" or c in "ёЁ")
+    return total > 0 and cyr / total >= 0.05
+
+
 def extract_phone(text: str) -> str | None:
     m = re.search(r"(\+?7\s?\(?\d{3}\)?\s?\d{3}[-\s]?\d{2}[-\s]?\d{2})", text)
     return m.group(1) if m else None
@@ -71,7 +106,7 @@ async def parse_resume_document(message, analyzer):
         return None, "not_doc"
     doc = message.document
     ext = (doc.file_name or "").split(".")[-1].lower()
-    if ext not in ("txt", "docx", "pdf", "doc"):
+    if ext not in ("txt", "docx", "pdf", "doc", "rtf"):
         return None, "ext"
     try:
         data = await message.bot.download(doc, destination=None)
