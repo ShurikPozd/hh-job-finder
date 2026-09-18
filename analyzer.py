@@ -348,12 +348,15 @@ class Analyzer:
                 "Правила ATS: монотекст, без таблиц, без лишних местоимений, "
                 "глагол+действие+результат, до 3000 символов."
             )
-            bank_ref = bank[:6000]
+            bank_ref = bank[: config.GROQ_LETTER_BANK_MAX_CHARS]
+            if len(bank) > config.GROQ_LETTER_BANK_MAX_CHARS:
+                log.warning("Банк профиля (%d симв.) длиннее GROQ_LETTER_BANK_MAX_CHARS=%d — письмо может потерять разделы",
+                            len(bank), config.GROQ_LETTER_BANK_MAX_CHARS)
         user = json.dumps({
             "vacancy": {
                 "title": vacancy.get("name"),
                 "company": vacancy.get("employer_name"),
-                "description": vacancy.get("description", "")[:5000],
+                "description": vacancy.get("description", "")[: config.GROQ_LETTER_DESC_MAX_CHARS],
             },
             "candidate_profile": profile,
             "profile_bank": bank_ref,

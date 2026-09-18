@@ -32,6 +32,14 @@ GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS") or 600)
 GROQ_SCORE_MAX_TOKENS = int(os.getenv("GROQ_SCORE_MAX_TOKENS") or 400)
 GROQ_LETTER_MAX_TOKENS = int(os.getenv("GROQ_LETTER_MAX_TOKENS") or 800)
 GROQ_BANK_MAX_TOKENS = int(os.getenv("GROQ_BANK_MAX_TOKENS") or 2500)
+# Письма должны читать банк ЦЕЛИКОМ, но лимит qwen 8000 TPM/запрос (Groq
+# отвечает на превышение 413 «Request too large») не даёт передать больше
+# ~7k токенов промпта за один вызов. Банк уплотнён, чтобы влезать в
+# GROQ_LETTER_BANK_MAX_CHARS симв.; при превышении — лог-предупреждение.
+GROQ_LETTER_BANK_MAX_CHARS = int(os.getenv("GROQ_LETTER_BANK_MAX_CHARS") or 16000)
+# Описание вакансии в промпте письма: суть всегда в начале, полный текст не
+# нужен — режем, чтобы освободить место под банк в бюджете ITPM (7000).
+GROQ_LETTER_DESC_MAX_CHARS = int(os.getenv("GROQ_LETTER_DESC_MAX_CHARS") or 2000)
 
 # ===== Бюджет LLM =====
 # Оценка стоимости одной вакансии (вход+выход) для планирования прогона.
