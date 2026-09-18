@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -11,7 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 import config
 from db import DEFAULT_PROFILE, utcnow
 from keyboards import (settings_keyboard, bank_keyboard, cancel_keyboard,
-                       profile_keyboard)
+                       profile_keyboard, resume_sections_keyboard)
 from resume_parser import parse_resume_document, pop_profile_note
 
 log = logging.getLogger("handlers.settings")
@@ -400,6 +401,100 @@ async def _save_float(message: Message, state: FSMContext, field: str, lo, hi):
     await message.answer("✅ Сохранено.", reply_markup=settings_keyboard())
 
 
+RESUME_TOP_HEADERS = {
+    "Желаемая должность и зарплата": "Желаемая должность и зарплата",
+    "Образование": "Образование",
+    "Электронные сертификаты": "Электронные сертификаты",
+    "Навыки": "Навыки",
+    "Дополнительная информация": "Дополнительная информация",
+}
+
+
+def _resume_header(line: str):
+    """Заголовок топ-секции резюме hh.ru, если строка им является, иначе None."""
+    low = line.rstrip("|").strip()
+    if low in RESUME_TOP_HEADERS:
+        return RESUME_TOP_HEADERS[low]
+    if low.startswith("Опыт работы"):
+        return "Опыт работы"
+    return None
+
+
+def _clean_section_body(body: str) -> str:
+    """Убрать RTF-артефакты экспорта hh.ru: строки-пайпы и пайпы в конце строк."""
+    body = re.sub(r"(?m)^\s*\|\s*$", "", body)
+    body = re.sub(r"(?m)\|\s*$", "", body)
+    body = re.sub(r"^\s*\|", "", body)
+    return body.strip()
+
+
+def split_resume_sections(text: str) -> list[tuple[str, str]]:
+    """Резюме (экспорт hh.ru) → список (заголовок, тело).
+
+    Шапка до первого заголовка + топ-секции; внутри «Опыт работы» каждый блок
+    (строка начинается с '|') становится отдельным пунктом «Опыт: …», причём
+    служебные строки до первого блока (заголовок опыта, дата, длительность)
+    присоединяются к первому «Опыт:». Если ничего не распознано — один пункт
+    «Резюме» целиком."""
+    sections: list[tuple[str, str]] = []
+    preamble: list[str] = []
+    cur: list[str] = []
+    cur_title = None
+    in_exp = False
+    exp_pending = False
+    exp_pre: list[str] = []
+
+    def flush():
+        if cur_title is not None:
+            sections.append((cur_title, _clean_section_body("\n".join(cur))))
+
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        header = _resume_header(s)
+        if header:
+            flush()
+            cur_title = None
+            cur = []
+            if header == "Опыт работы":
+                in_exp = True
+                exp_pending = True
+                exp_pre = [s]
+            else:
+                in_exp = False
+                exp_pending = False
+                exp_pre = []
+                cur_title = header
+            continue
+        if in_exp and s.startswith("|") and s != "|":
+            name = re.sub(r"^Организация:\s*", "", s.lstrip("|").strip())
+            if name:
+                flush()
+                cur_title = f"Опыт: {name[:40]}"
+                cur = list(exp_pre)
+                exp_pre = []
+                exp_pending = False
+                continue
+        if exp_pending:
+            exp_pre.append(raw)
+        elif cur_title is None:
+            preamble.append(raw)
+        else:
+            cur.append(raw)
+    flush()
+
+    if preamble:
+        sections.insert(0, ("Шапка и контакты", _clean_section_body("\n".join(preamble))))
+    if not sections:
+        return [("Резюме", (text or "").strip())]
+    return sections
+
+
+def _resume_section_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К оглавлению", callback_data="resume:toc")],
+    ])
+
+
 async def _chunk_reply(call: CallbackQuery, text: str, kb):
     """Длинный текст: первый кусок — edit_text, остальные — новые сообщения."""
     chunks = [text[i:i + 3800] for i in range(0, len(text), 3800)]
@@ -423,6 +518,12 @@ async def _show_resume(call: CallbackQuery, user: dict, as_file: bool):
             caption="📄 Текст загруженного резюме")
         return
     header = f"📄 Резюме ({str(user.get('resume_at') or '')[:10]}):\n\n"
+    sections = split_resume_sections(resume)
+    if len(sections) > 1:
+        await call.message.edit_text(
+            f"📄 Резюме ({str(user.get('resume_at') or '')[:10]}) — выбери раздел:",
+            reply_markup=resume_sections_keyboard(sections))
+        return
     body = resume
     chunks = [header + body[i:i + 3800] for i in range(0, len(body), 3800)]
     for i, chunk in enumerate(chunks):
@@ -431,3 +532,43 @@ async def _show_resume(call: CallbackQuery, user: dict, as_file: bool):
         else:
             await call.message.answer(
                 chunk, reply_markup=profile_keyboard() if i == len(chunks) - 1 else None)
+
+
+@router.callback_query(F.data.regexp(r"^resume:sec:\d+$"))
+async def cb_resume_section(call: CallbackQuery):
+    user = await router.obj.db.get_user(call.from_user.id)
+    sections = split_resume_sections(user.get("resume_text") or "")
+    idx = int(call.data.split(":")[2])
+    if idx >= len(sections):
+        await call.answer("Раздел не найден.", show_alert=True)
+        return
+    title, body = sections[idx]
+    text = f"📄 {title}\n\n{body}"
+    kb = _resume_section_kb()
+    if len(text) <= 4096:
+        await call.message.edit_text(text, reply_markup=kb)
+    else:
+        await call.message.edit_text(text[:4096])
+        await call.message.answer(f"📄 {title} (продолжение)\n\n{text[4096:]}",
+                                  reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data == "resume:toc")
+async def cb_resume_toc(call: CallbackQuery):
+    user = await router.obj.db.get_user(call.from_user.id)
+    sections = split_resume_sections(user.get("resume_text") or "")
+    if len(sections) > 1:
+        await call.message.edit_text(
+            f"📄 Резюме ({str(user.get('resume_at') or '')[:10]}) — выбери раздел:",
+            reply_markup=resume_sections_keyboard(sections))
+    else:
+        await call.message.edit_text("📄 Резюме:", reply_markup=profile_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data == "resume:toc_back")
+async def cb_resume_toc_back(call: CallbackQuery):
+    await call.message.edit_text(
+        "📝 Профиль и резюме:", reply_markup=profile_keyboard())
+    await call.answer()

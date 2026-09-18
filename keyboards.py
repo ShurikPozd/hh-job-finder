@@ -104,14 +104,28 @@ def bank_keyboard() -> InlineKeyboardMarkup:
     return kb
 
 
+def sections_keyboard(sections: list[tuple[str, str]], prefix: str, back_cb: str,
+                      numbered: bool = False) -> InlineKeyboardMarkup:
+    """Оглавление: кнопка на каждый раздел + «назад». prefix — пространство
+    callback_data (bank/resume); numbered — нумеровать пункты (1. 2. …)."""
+    rows = []
+    for i, (title, _body) in enumerate(sections):
+        label = title[:36]
+        if numbered:
+            label = f"{i + 1}. {title[:33]}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"{prefix}:sec:{i}")])
+    rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data=back_cb)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def bank_sections_keyboard(sections: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     """Оглавление банка: кнопка на каждый раздел (заголовок '## ') + «назад»."""
-    rows = [
-        [InlineKeyboardButton(text=title[:36], callback_data=f"bank:sec:{i}")]
-        for i, (title, _body) in enumerate(sections)
-    ]
-    rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="bank:toc_back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return sections_keyboard(sections, "bank", "bank:toc_back")
+
+
+def resume_sections_keyboard(sections: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Оглавление резюме: нумерованные кнопки по разделам + «назад»."""
+    return sections_keyboard(sections, "resume", "resume:toc_back", numbered=True)
 
 
 def profile_keyboard() -> InlineKeyboardMarkup:
