@@ -6,7 +6,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from formatters import format_detail
-from keyboards import settings_keyboard, bank_keyboard, cancel_keyboard, vacancy_keyboard, hide_confirm_keyboard
+from keyboards import (settings_keyboard, bank_keyboard, bank_sections_keyboard,
+                       cancel_keyboard, vacancy_keyboard, hide_confirm_keyboard)
 from analyzer import set_usage_source, reset_usage_source
 
 log = logging.getLogger("handlers.callbacks")
@@ -153,7 +154,7 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("bank:"))
+@router.callback_query(F.data.regexp(r"^bank:(upload|generate|view|delete)$"))
 async def cb_bank(call: CallbackQuery, state: FSMContext):
     action = call.data.split(":")[1]
     user_id = call.from_user.id
@@ -177,23 +178,95 @@ async def cb_bank(call: CallbackQuery, state: FSMContext):
     elif action == "view":
         user = await router.obj.db.get_user(user_id)
         bank = user.get("profile_bank")
-        if bank:
-            header = "📁 Ваш банк профиля:\n\n"
-            # Telegram лимит 4096 символов на сообщение — шлём частями
-            body = bank
-            chunks = [header + body[i:i + 3800] for i in range(0, len(body), 3800)]
-            chunks[0] = header + body[:3800]
-            for i, chunk in enumerate(chunks):
-                kb = bank_keyboard() if i == len(chunks) - 1 else None
-                if i == 0:
-                    await call.message.edit_text(chunk, reply_markup=kb)
-                else:
-                    await call.message.answer(chunk, reply_markup=kb)
-        else:
+        if not bank:
             await call.message.edit_text("Банк не загружен. Сгенерируй или загрузи.", reply_markup=bank_keyboard())
+            return
+        sections = split_bank_sections(bank)
+        if len(sections) > 1:
+            await call.message.edit_text(
+                "📁 Банк профиля — выбери раздел:",
+                reply_markup=bank_sections_keyboard(sections),
+            )
+        else:
+            await _view_bank_plain(call, bank)
     elif action == "delete":
         await router.obj.db.upsert_user(user_id, profile_bank=None)
         await call.message.edit_text("🗑 Банк удалён. Использую универсальный шаблон.", reply_markup=bank_keyboard())
+    await call.answer()
+
+
+def split_bank_sections(bank: str) -> list[tuple[str, str]]:
+    """Банк → список (заголовок, текст) по разделам '## '. Текст до первого
+    '## ' показываем как раздел «Введение»."""
+    sections: list[tuple[str, str]] = []
+    cur_title: str | None = None
+    cur: list[str] = []
+    for line in (bank or "").splitlines():
+        if line.startswith("## "):
+            if cur_title is not None:
+                sections.append((cur_title, "\n".join(cur).strip()))
+            cur_title = line[3:].strip()
+            cur = []
+        else:
+            cur.append(line)
+    if cur_title is not None:
+        sections.append((cur_title, "\n".join(cur).strip()))
+    elif cur:
+        sections.append(("Введение", "\n".join(cur).strip()))
+    return sections
+
+
+async def _view_bank_plain(call: CallbackQuery, bank: str):
+    """Фолбэк: банк без разделов '## ' — показываем кусками по 3800."""
+    header = "📁 Ваш банк профиля:\n\n"
+    chunks = [header + bank[i:i + 3800] for i in range(0, len(bank), 3800)]
+    chunks[0] = header + bank[:3800]
+    for i, chunk in enumerate(chunks):
+        kb = bank_keyboard() if i == len(chunks) - 1 else None
+        if i == 0:
+            await call.message.edit_text(chunk, reply_markup=kb)
+        else:
+            await call.message.answer(chunk, reply_markup=kb)
+
+
+@router.callback_query(F.data.regexp(r"^bank:sec:\d+$"))
+async def cb_bank_section(call: CallbackQuery):
+    idx = int(call.data.split(":")[2])
+    user = await router.obj.db.get_user(call.from_user.id)
+    sections = split_bank_sections(user.get("profile_bank") or "")
+    if idx >= len(sections):
+        await call.answer("Раздел не найден.", show_alert=True)
+        return
+    title, body = sections[idx]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К оглавлению", callback_data="bank:toc")],
+    ])
+    text = f"📁 {title}\n\n{body}"
+    if len(text) <= 4096:
+        await call.message.edit_text(text, reply_markup=kb)
+    else:
+        await call.message.edit_text(text[:4096])
+        await call.message.answer(f"📁 {title} (продолжение)\n\n{text[4096:]}", reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data == "bank:toc")
+async def cb_bank_toc(call: CallbackQuery):
+    user = await router.obj.db.get_user(call.from_user.id)
+    sections = split_bank_sections(user.get("profile_bank") or "")
+    if len(sections) > 1:
+        await call.message.edit_text(
+            "📁 Банк профиля — выбери раздел:",
+            reply_markup=bank_sections_keyboard(sections),
+        )
+    else:
+        await call.message.edit_text("📁 Банк профиля:", reply_markup=bank_keyboard())
+    await call.answer()
+
+
+@router.callback_query(F.data == "bank:toc_back")
+async def cb_bank_toc_back(call: CallbackQuery):
+    await call.message.edit_text("📁 Банк профиля:", reply_markup=bank_keyboard())
     await call.answer()
 
 

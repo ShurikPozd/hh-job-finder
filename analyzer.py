@@ -280,8 +280,8 @@ def _append_signature(text: str, profile: dict) -> str:
     if re.search(r"с\s+уважением", text, re.IGNORECASE):
         return text
     parts = (profile.get("name") or "").replace("\u202f", " ").split()
-    name = f"{parts[1]} {parts[0]}" if len(parts) >= 2 else " ".join(parts) or "Поздняков Александр"
-    return f"{text}\n\nС уважением, {name}"
+    name = " ".join(parts) or "Поздняков Александр"
+    return f"{text}\n\nС уважением, {name}."
 
 
 def _letter_profile(profile: dict) -> dict:

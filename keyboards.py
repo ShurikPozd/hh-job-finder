@@ -104,6 +104,16 @@ def bank_keyboard() -> InlineKeyboardMarkup:
     return kb
 
 
+def bank_sections_keyboard(sections: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Оглавление банка: кнопка на каждый раздел (заголовок '## ') + «назад»."""
+    rows = [
+        [InlineKeyboardButton(text=title[:36], callback_data=f"bank:sec:{i}")]
+        for i, (title, _body) in enumerate(sections)
+    ]
+    rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="bank:toc_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def profile_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
