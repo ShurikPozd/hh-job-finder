@@ -272,6 +272,51 @@ def _letter_text(text: str) -> str:
     return out.strip()
 
 
+def _append_signature(text: str, profile: dict) -> str:
+    """Подпись в конце письма. Если модель сама написала «С уважением» — не дублируем."""
+    text = (text or "").strip()
+    if not text:
+        return text
+    if re.search(r"с\s+уважением", text, re.IGNORECASE):
+        return text
+    parts = (profile.get("name") or "").replace("\u202f", " ").split()
+    name = f"{parts[1]} {parts[0]}" if len(parts) >= 2 else " ".join(parts) or "Поздняков Александр"
+    return f"{text}\n\nС уважением, {name}"
+
+
+def _letter_profile(profile: dict) -> dict:
+    """Компактная карточка кандидата для письма.
+
+    Детали проектов несёт банк профиля, поэтому описания проектов в промпт не
+    дублируем: берём образование, языки, локацию, зп, about + сводки проектов
+    (имя/роль/период) без description. Если карточка всё равно больше лимита —
+    по очереди отбрасываем проекты, затем скиллы."""
+    card: dict = {}
+    for k in ("name", "title", "education", "languages", "city",
+              "experience_years", "salary_expectation", "about"):
+        v = profile.get(k)
+        if v not in (None, "", [], {}, 0):
+            card[k] = v
+    projects = profile.get("projects") or []
+    if projects:
+        card["projects"] = [
+            {kk: p.get(kk) for kk in ("name", "role", "period") if p.get(kk)}
+            for p in projects if isinstance(p, dict)
+        ]
+    skills = profile.get("skills") or []
+    if skills:
+        card["skills"] = skills
+    while len(json.dumps(card, ensure_ascii=False)) > config.GROQ_LETTER_PROFILE_MAX_CHARS:
+        for drop in ("projects", "skills"):
+            if drop in card:
+                log.warning("Карточка профиля для письма больше лимита — убрали %s", drop)
+                del card[drop]
+                break
+        else:
+            card["about"] = (card.get("about") or "")[:200]
+    return card
+
+
 class Analyzer:
     async def score_vacancy(self, vacancy: dict, profile: dict) -> dict | None:
         """0-10 скоринг соответствия вакансии профилю.
@@ -358,7 +403,7 @@ class Analyzer:
                 "company": vacancy.get("employer_name"),
                 "description": vacancy.get("description", "")[: config.GROQ_LETTER_DESC_MAX_CHARS],
             },
-            "candidate_profile": profile,
+            "candidate_profile": _letter_profile(profile),
             "profile_bank": bank_ref,
         }, ensure_ascii=False)
         models: list[str] = []
@@ -371,7 +416,7 @@ class Analyzer:
                 out = await _post_groq(system, user, 0.5,
                                        max_tokens=config.GROQ_LETTER_MAX_TOKENS,
                                        model=model)
-                return _letter_text(out)
+                return _append_signature(_letter_text(out), profile)
             except Exception as e:
                 last_err = e
                 log.warning("Письмо моделью %s не удалось: %s", model, e)

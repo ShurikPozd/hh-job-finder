@@ -41,6 +41,11 @@ GROQ_LETTER_BANK_MAX_CHARS = int(os.getenv("GROQ_LETTER_BANK_MAX_CHARS") or 1600
 # нужен — режем, чтобы освободить место под банк в бюджете ITPM (7000).
 GROQ_LETTER_DESC_MAX_CHARS = int(os.getenv("GROQ_LETTER_DESC_MAX_CHARS") or 2000)
 
+# Карточка кандидата в промпте письма: детали проектов целиком несёт банк,
+# поэтому профиль передаём компактно (обучение, языки, локация + сводки проектов
+# без описаний). Защита от 413 по ITPM при «распухании» профиля.
+GROQ_LETTER_PROFILE_MAX_CHARS = int(os.getenv("GROQ_LETTER_PROFILE_MAX_CHARS") or 3500)
+
 # ===== Бюджет LLM =====
 # Оценка стоимости одной вакансии (вход+выход) для планирования прогона.
 SCORE_EST_TOKENS = int(os.getenv("SCORE_EST_TOKENS") or 1500)
