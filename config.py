@@ -45,7 +45,7 @@ SCORE_TOKEN_BUDGET_PER_DAY = int(os.getenv("SCORE_TOKEN_BUDGET_PER_DAY") or 6000
 # Очередь seen-без-vacancies: воркер каждые N минут берёт пачку, фильтрует по
 # аккредитации и скорингу, находки присылает с пометкой «↩ найдена при перепроверке».
 # Бюджет отдельный от поиска (учитывается через llm_usage.source='recheck').
-RECHECK_ENABLED = int(os.getenv("RECHECK_ENABLED") or 1) == 1
+RECHECK_ENABLED = int(os.getenv("RECHECK_ENABLED") or 0) == 1
 RECHECK_BATCH = int(os.getenv("RECHECK_BATCH") or 5)
 RECHECK_INTERVAL_MIN = int(os.getenv("RECHECK_INTERVAL_MIN") or 20)
 RECHECK_TOKEN_BUDGET_PER_DAY = int(os.getenv("RECHECK_TOKEN_BUDGET_PER_DAY") or 20000)

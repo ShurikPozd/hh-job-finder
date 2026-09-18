@@ -198,7 +198,12 @@ def _post_curl_sync(url: str, headers: dict, payload: dict, timeout: int | None 
             "-o", "-",
             "-w", "\n%{http_code}",
         ]
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+        startupinfo = None
+        if _os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout + 10, startupinfo=startupinfo)
         out = (r.stdout or b"").rstrip()
         body, _, status_s = out.rpartition(b"\n")
         status = int(status_s) if status_s.isdigit() else 0

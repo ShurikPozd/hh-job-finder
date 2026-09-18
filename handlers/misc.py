@@ -119,6 +119,13 @@ async def cmd_recheck(message: Message):
         await message.answer("Сначала настрой профиль: /start")
         return
     db = router.obj.db
+    if not config.RECHECK_ENABLED:
+        await message.answer(
+            "🔁 Перепроверка пропущенных вакансий **выключена**.\n"
+            "Все аккредитованные вакансии со score ≥ порога и так сохраняются "
+            "обычным поиском. Включить можно в `.env`: `RECHECK_ENABLED=1`."
+        )
+        return
     stats = await db.recheck_stats()
     base = ""
     if stats["pending"] == 0:
