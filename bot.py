@@ -87,11 +87,12 @@ class App:
         from handlers import common as h_common
         from handlers import start as h_start
         from handlers import search as h_search
+        from handlers import letter as h_letter
         from handlers import settings as h_settings
         from handlers import callbacks as h_callbacks
         from handlers import misc as h_misc
-        for r in (h_common.router, h_start.router, h_search.router, h_settings.router,
-                  h_callbacks.router, h_misc.router):
+        for r in (h_common.router, h_start.router, h_search.router, h_letter.router,
+                  h_settings.router, h_callbacks.router, h_misc.router):
             r.obj = self
             self.dispatcher.include_router(r)
 
@@ -105,6 +106,7 @@ class App:
             BotCommand(command="vacancies", description="Присланные вакансии"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="status", description="Статус и статистика"),
+            BotCommand(command="letter", description="Сопроводительное по ссылке"),
             BotCommand(command="recheck", description="Перепроверка пропущенных"),
             BotCommand(command="help", description="Справка"),
         ])
@@ -112,7 +114,30 @@ class App:
         from scheduler import start_scheduler
         await start_scheduler(self.db, self.service)
 
+        await self._load_bank_file()
+
         await self._restore_or_backup()
+
+    async def _load_bank_file(self):
+        """Автозагрузка банка профиля из файла (env BANK_FILE) в users.profile_bank."""
+        if not config.BANK_FILE:
+            return
+        path = Path(config.BANK_FILE)
+        if not path.is_file():
+            log.warning("BANK_FILE не найден: %s", config.BANK_FILE)
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as e:
+            log.warning("Не прочитан BANK_FILE %s: %s", config.BANK_FILE, e)
+            return
+        loaded = text.strip()
+        if not loaded:
+            return
+        owner = config.OWNER_ID
+        if owner is not None:
+            await self.db.upsert_user(owner, profile_bank=loaded)
+            log.info("Банк профиля загружен из файла (%d символов)", len(loaded))
 
     async def _restore_or_backup(self):
         """Эфемерный диск Render: если БД пуста — восстановить из GitHub из бэкапа.

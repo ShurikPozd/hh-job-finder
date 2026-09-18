@@ -21,6 +21,7 @@ HELP_TEXT = (
     "/vacancies — список уже присланных вакансий\n"
     "/settings — настройки фильтров, банка и профиля\n"
     "/status — текущий профиль и статистика\n"
+    "/letter — сопроводительное по ссылке на вакансию\n"
     "/recheck — перепроверка пропущенных вакансий\n"
     "/help — эта справка\n\n"
     "💡 Клавиатура внизу дублирует команды, а в сообщениях вакансий "
@@ -52,6 +53,10 @@ async def cmd_status(message: Message):
         resume_line = f"📄 Резюме: загружено {str(user.get('resume_at') or '')[:10]} · {len(resume)} симв."
     rc = await router.obj.db.recheck_stats()
     recheck_line = f"🔁 Перепроверка: {rc['pending']} в очереди · найдено {rc['sent']}"
+    letter_used = await router.obj.db.llm_tokens_today(source="letter")
+    llm_line = f"🔌 LLM сегодня: {usage['calls']} вызовов · {usage['tokens']} токенов"
+    if letter_used:
+        llm_line += f" (письма {letter_used})"
     lines = [
         "📊 Статус:\n",
         f"👤 {profile.get('name') or '—'} · {profile.get('title') or '—'}",
@@ -70,7 +75,7 @@ async def cmd_status(message: Message):
         f"🕐 Последний поиск: {last_search}",
         f"⏳ Идёт поиск сейчас: {'да' if router.obj.is_searching(user_id) else 'нет'}",
         recheck_line,
-        f"🔌 LLM сегодня: {usage['calls']} вызовов · {usage['tokens']} токенов",
+        llm_line,
     ]
     if usage["models"]:
         lines.append("   " + " · ".join(

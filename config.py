@@ -53,6 +53,11 @@ RECHECK_TOKEN_BUDGET_PER_DAY = int(os.getenv("RECHECK_TOKEN_BUDGET_PER_DAY") or 
 # ===== БД =====
 DB_PATH = os.getenv("DB_PATH", os.path.join("data", "hh_job_finder.db"))
 
+# ===== Банк профиля =====
+# Если задан путь к файлу банка (.md/.txt) — автоматически грузим его в
+# users.profile_bank OWNER_ID при старте (резерв: /settings → Банк → загрузить).
+BANK_FILE = os.getenv("BANK_FILE", "").strip() or None
+
 # ===== hh.ru поиск: дефолты =====
 HH_AREA = int(os.getenv("HH_AREA") or 1)  # 1 = Москва
 HH_EXPERIENCE = os.getenv("HH_EXPERIENCE", "noExperience,between1And3")

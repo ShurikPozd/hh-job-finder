@@ -74,6 +74,13 @@ async def interrupt_status(message: Message, state: FSMContext):
     await cmd_status(message)
 
 
+@router.message(StateFilter("*"), Command("letter"))
+async def interrupt_letter(message: Message, state: FSMContext):
+    await state.clear()
+    from handlers.letter import cmd_letter
+    await cmd_letter(message)
+
+
 @router.message(StateFilter("*"), Command("help"))
 async def interrupt_help(message: Message, state: FSMContext):
     await state.clear()

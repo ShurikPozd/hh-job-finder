@@ -7,6 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from formatters import format_detail
 from keyboards import settings_keyboard, bank_keyboard, cancel_keyboard, vacancy_keyboard, hide_confirm_keyboard
+from analyzer import set_usage_source, reset_usage_source
 
 log = logging.getLogger("handlers.callbacks")
 router = Router()
@@ -48,7 +49,13 @@ async def cb_letter(call: CallbackQuery):
     profile = _json.loads(profile)
     bank = user.get("profile_bank") or None
     await call.message.edit_text("✍️ Генерирую сопроводительное… (~20 сек)")
-    letter = await router.obj.analyzer.generate_cover_letter(rec, profile, bank)
+
+    # расход писать в source='letter' (раньше уходил в 'search')
+    token = set_usage_source("letter")
+    try:
+        letter = await router.obj.analyzer.generate_cover_letter(rec, profile, bank)
+    finally:
+        reset_usage_source(token)
     await router.obj.db.update_vacancy_letter(vid, letter)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ К вакансии", callback_data=f"detail:{vid}")],
