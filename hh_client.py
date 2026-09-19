@@ -102,6 +102,13 @@ class HHClient:
 
     def _parse_serp(self, html: str) -> dict:
         soup = self._soup(html)
+        # Пустой результат: hh.ru вместо 0 показывает блок рекомендаций на той
+        # же странице — их нельзя считать результатами поиска («fullstack python»).
+        h1 = soup.find("h1")
+        if h1:
+            title = (h1.get_text(" ", strip=True) or "").replace("\xa0", " ")
+            if "ничего не найдено" in title or "не найдено" in title:
+                return {"items": [], "found": 0}
         items = []
         for it in soup.select('[data-qa="vacancy-serp__vacancy"]'):
             a = it.select_one('a[data-qa="serp-item__title"]')

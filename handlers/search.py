@@ -22,7 +22,7 @@ async def cmd_search(message: Message):
         await message.answer("🔍 Ищу вакансии… может занять 30–120 сек.")
         result = await router.obj.service.run_search(user_id, silent=False, top_n=5)
         text = (
-            f"🔍 Найдено вакансий: {result['found']}\n"
+            f"🔍 Найдено: {result['found']} · новых для тебя: {result['new']}\n"
             f"🤖 Оценено: {result['scored']}\n"
             f"✅ Показано лучших: {result['sent']}\n"
         )

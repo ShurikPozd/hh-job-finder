@@ -18,6 +18,39 @@ from resume_parser import parse_resume_document, pop_profile_note
 log = logging.getLogger("handlers.settings")
 router = Router()
 
+EXPERIENCE_LABELS = [
+    ("noExperience", "Нет опыта"),
+    ("between1And3", "1–3 года"),
+    ("between3And6", "3–6 лет"),
+    ("moreThan6", "более 6 лет"),
+]
+
+
+def _exp_set(value: str) -> set[str]:
+    return {v for v in (value or "").split(",") if v}
+
+
+def _exp_joined(cur: set[str]) -> str:
+    return ",".join(v for v, _ in EXPERIENCE_LABELS if v in cur)
+
+
+def _exp_summary(cur: set[str]) -> str:
+    if not cur:
+        return "Нет ограничений (любой опыт)"
+    return ", ".join(lbl for v, lbl in EXPERIENCE_LABELS if v in cur)
+
+
+def _experience_kb(cur: set[str]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=("✅ " if v in cur else "▫️ ") + lbl,
+            callback_data=f"exp:toggle:{v}")]
+        for v, lbl in EXPERIENCE_LABELS
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Нет ограничений", callback_data="exp:any")])
+    rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 class SettingsFSM(StatesGroup):
     enter_keywords = State()
@@ -62,14 +95,11 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
             reply_markup=cancel_keyboard(),
         )
     elif action == "experience":
-        opts = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="0 лет (noExperience)", callback_data="exp:noExperience")],
-            [InlineKeyboardButton(text="1–3 года", callback_data="exp:between1And3")],
-            [InlineKeyboardButton(text="3–6 лет", callback_data="exp:between3And6")],
-            [InlineKeyboardButton(text="Нет ограничений", callback_data="exp:any")],
-            [InlineKeyboardButton(text="↩️ Назад", callback_data="settings")],
-        ])
-        await call.message.edit_text("🎯 Требуемый опыт:", reply_markup=opts)
+        cur = _exp_set(user.get("experience"))
+        await call.message.edit_text(
+            "🎯 Требуемый опыт (отметь нужные):\n\n"
+            "Выбрано: " + _exp_summary(cur),
+            reply_markup=_experience_kb(cur))
     elif action == "schedule":
         opts = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Только удалёнка", callback_data="sch:remote")],
@@ -237,16 +267,34 @@ async def _list_responded(call: CallbackQuery):
     await call.message.edit_text("✅ Вакансии, где откликнулся:\n(нажми, чтобы вернуть в поиск)", reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("exp:"))
+@router.callback_query(F.data.regexp(r"^exp:(any|noExperience|between1And3|between3And6|moreThan6)$"))
 async def cb_exp(call: CallbackQuery):
     val = call.data.split(":")[1]
-    if val == "any":
-        new = ""
-    else:
-        new = val
+    new = "" if val == "any" else val
     await router.obj.db.upsert_user(call.from_user.id, experience=new)
-    await call.answer(f"Опыт: {val}", show_alert=False)
-    await call.message.edit_text("✅ Сохранено.", reply_markup=settings_keyboard())
+    cur = _exp_set(new)
+    await call.message.edit_text(
+        "🎯 Требуемый опыт (отметь нужные):\n\n"
+        "Выбрано: " + _exp_summary(cur),
+        reply_markup=_experience_kb(cur))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("exp:toggle:"))
+async def cb_exp_toggle(call: CallbackQuery):
+    val = call.data.split(":")[2]
+    user = await router.obj.db.get_user(call.from_user.id)
+    cur = _exp_set(user.get("experience"))
+    if val in cur:
+        cur.discard(val)
+    else:
+        cur.add(val)
+    await router.obj.db.upsert_user(call.from_user.id, experience=_exp_joined(cur))
+    await call.message.edit_text(
+        "🎯 Требуемый опыт (отметь нужные):\n\n"
+        "Выбрано: " + _exp_summary(cur),
+        reply_markup=_experience_kb(cur))
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("sch:"))

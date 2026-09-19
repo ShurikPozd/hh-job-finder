@@ -69,6 +69,12 @@ class VacancyService:
 
         log.info("Найдено %d вакансий для user %s", len(fetched), user_id)
 
+        # Сколько из выдачи ещё не видел юзер (новые/отложенные прошлых прогонов)
+        new_cnt = 0
+        for it in fetched:
+            if not await self.db.is_seen(user_id, str(it["id"])):
+                new_cnt += 1
+
         # Бюджет скоринга в токенах: не жжём free-квоту (её делят tg-saver и
         # расширение пользователя) и не теряем вакансии — что не успели оценить,
         # останется необработанным и попадёт в следующий прогон
@@ -155,7 +161,7 @@ class VacancyService:
                         "лимит дня %d (осталось ~%d)",
                         deferred, spent_total, config.SCORE_TOKEN_BUDGET_PER_DAY,
                         max(0, int(budget)))
-        return {"found": len(fetched), "scored": scored, "sent": sent,
+        return {"found": len(fetched), "new": new_cnt, "scored": scored, "sent": sent,
                 "deferred": deferred, "tokens": spent_total}
 
     # ============ Сборка записи о вакансии ============
