@@ -52,7 +52,7 @@ SCORE_EST_TOKENS = int(os.getenv("SCORE_EST_TOKENS") or 1500)
 # Бюджеты на прогон и на сутки. Общий пул qwen (200k/день) делят также
 # tg-saver и расширение пользователя — берём только часть.
 SCORE_TOKEN_BUDGET_PER_RUN = int(os.getenv("SCORE_TOKEN_BUDGET_PER_RUN") or 18000)
-SCORE_TOKEN_BUDGET_PER_DAY = int(os.getenv("SCORE_TOKEN_BUDGET_PER_DAY") or 60000)
+SCORE_TOKEN_BUDGET_PER_DAY = int(os.getenv("SCORE_TOKEN_BUDGET_PER_DAY") or 100000)
 
 # ===== Перепроверка пропущенных вакансий =====
 # Очередь seen-без-vacancies: воркер каждые N минут берёт пачку, фильтрует по
