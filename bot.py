@@ -65,12 +65,12 @@ class App:
         asyncio.create_task(go())
 
     def is_searching(self, user_id: int) -> bool:
-        lock = self._search_locks.get(user_id)
-        return lock is not None and lock.locked()
+        if self.service:
+            return self.service.is_searching(user_id)
+        return False
 
     async def search_lock(self, user_id: int):
-        lock = self._search_locks.setdefault(user_id, asyncio.Lock())
-        return lock
+        return await self.service.search_lock(user_id)
 
     async def startup(self):
         await self.db.connect()
@@ -104,6 +104,7 @@ class App:
             BotCommand(command="start", description="Приветствие и настройка"),
             BotCommand(command="search", description="Ручной поиск сейчас"),
             BotCommand(command="vacancies", description="Присланные вакансии"),
+            BotCommand(command="score", description="Вакансии с оценкой N"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="status", description="Статус и статистика"),
             BotCommand(command="letter", description="Сопроводительное по ссылке"),

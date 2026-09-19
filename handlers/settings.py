@@ -111,15 +111,19 @@ async def cb_set(call: CallbackQuery, state: FSMContext):
         await call.message.edit_text("📍 График работы:", reply_markup=opts)
     elif action == "salary":
         await state.set_state(SettingsFSM.enter_salary)
+        cur_sal = int(user.get("min_salary") or config.HH_MIN_SALARY or 0)
+        sal_note = "без фильтра" if not cur_sal else f"{cur_sal:,}".replace(",", " ") + " ₽"
         await call.message.edit_text(
-            "💰 Минимальная зарплата (в рублях, только число):",
+            f"💰 Минимальная зарплата (в рублях). Сейчас: {sal_note}.\n"
+            "Введи число:",
             reply_markup=cancel_keyboard(),
         )
     elif action == "threshold":
         await state.set_state(SettingsFSM.enter_threshold)
+        cur_thr = user.get("match_threshold") or config.DEFAULT_MATCH_THRESHOLD
         await call.message.edit_text(
-            "📊 Порог соответствия 0–10 (по умолчанию 6).\n"
-            "Чем выше — тем строже фильтр.\nВведи число:",
+            f"📊 Порог соответствия 0–10. Сейчас: {cur_thr}.\n"
+            "Чем выше — тем строже фильтр. Введи число:",
             reply_markup=cancel_keyboard(),
         )
     elif action == "interval":

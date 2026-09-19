@@ -146,6 +146,8 @@ class Database:
         await self._ensure_column("users", "resume_text", "TEXT")
         await self._ensure_column("users", "resume_filename", "TEXT")
         await self._ensure_column("users", "resume_at", "TEXT")
+        await self._ensure_column("vacancies", "below_threshold",
+                                  "INTEGER NOT NULL DEFAULT 0")
         await self._migrate_llm_usage_source()
 
     async def _migrate_llm_usage_source(self):
@@ -240,8 +242,10 @@ class Database:
             "experience_id", "experience_name", "description", "key_skills",
             "area_name", "url", "published_at", "accredited_it",
             "accreditation_source", "llm_score", "llm_summary", "created_at",
+            "below_threshold",
         ]
         data = {k: v.get(k) for k in keys}
+        data["below_threshold"] = int(v.get("below_threshold", 0) or 0)
         if data["key_skills"] is not None and not isinstance(data["key_skills"], str):
             data["key_skills"] = json.dumps(data["key_skills"], ensure_ascii=False)
         if data["accreditation_source"] and not isinstance(data["accreditation_source"], str):
@@ -366,6 +370,20 @@ class Database:
             "WHERE s.user_id = ? AND s.status = 'hidden' "
             "ORDER BY s.last_seen DESC",
             (user_id,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def list_by_score(self, user_id: int, score: int,
+                            limit: int = 15) -> list[dict]:
+        """Вакансии (в т.ч. ниже-пороговые) с конкретной оценкой скоринга,
+        свежие первыми. Просмотр — бесплатно, оценка уже посчитана при поиске."""
+        cur = await self._conn.execute(
+            "SELECT v.*, s.status, s.last_seen FROM vacancies v "
+            "JOIN seen_vacancies s ON s.vacancy_id = v.vacancy_id "
+            "WHERE s.user_id = ? AND v.llm_score = ? "
+            "ORDER BY s.last_seen DESC LIMIT ?",
+            (user_id, score, limit),
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]

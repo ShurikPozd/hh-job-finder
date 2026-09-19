@@ -203,5 +203,23 @@ def vacancy_list_keyboard(items: list[dict], page: int, total_pages: int,
             text=mark(filter_ == "pending", "📄 Не откликался"),
             callback_data=f"vl:0:{sort}:pending"),
     ])
+    rows.append([
+        InlineKeyboardButton(text="🔎 По оценке", callback_data="vl_score"),
+    ])
     rows.append([InlineKeyboardButton(text="↩️ В настройки", callback_data="settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def score_list_keyboard(items: list[dict]) -> InlineKeyboardMarkup:
+    """Список вакансий с определённой оценкой (см. /score): кнопка-строка на
+    каждую + «назад» к общему списку. Просмотр оценок токенов не тратит."""
+    rows = []
+    for it in items:
+        label = f"🎯 {it.get('llm_score')}/10 "
+        label += it.get("name") or it["vacancy_id"]
+        if it.get("employer_name"):
+            label += f" — {it['employer_name']}"
+        rows.append([InlineKeyboardButton(
+            text=label[:60], callback_data=f"vl_open:{it['vacancy_id']}")])
+    rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="vl_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -51,7 +51,7 @@ GROQ_LETTER_PROFILE_MAX_CHARS = int(os.getenv("GROQ_LETTER_PROFILE_MAX_CHARS") o
 SCORE_EST_TOKENS = int(os.getenv("SCORE_EST_TOKENS") or 1500)
 # Бюджеты на прогон и на сутки. Общий пул qwen (200k/день) делят также
 # tg-saver и расширение пользователя — берём только часть.
-SCORE_TOKEN_BUDGET_PER_RUN = int(os.getenv("SCORE_TOKEN_BUDGET_PER_RUN") or 6000)
+SCORE_TOKEN_BUDGET_PER_RUN = int(os.getenv("SCORE_TOKEN_BUDGET_PER_RUN") or 18000)
 SCORE_TOKEN_BUDGET_PER_DAY = int(os.getenv("SCORE_TOKEN_BUDGET_PER_DAY") or 60000)
 
 # ===== Перепроверка пропущенных вакансий =====
@@ -89,6 +89,8 @@ HH_MIN_SALARY = int(os.getenv("HH_MIN_SALARY") or 0)
 # ===== Логика уведомлений =====
 DEFAULT_MATCH_THRESHOLD = int(os.getenv("DEFAULT_MATCH_THRESHOLD") or 6)  # 0..10
 DEFAULT_SEARCH_INTERVAL_HOURS = float(os.getenv("DEFAULT_SEARCH_INTERVAL_HOURS") or 3)
+# Тик фонового планировщика: чаще интервала юзера, внутри решается кого гонять.
+SCHEDULER_TICK_MIN = int(os.getenv("SCHEDULER_TICK_MIN") or 30)
 SEARCH_INTERVAL_MIN = float(os.getenv("SEARCH_INTERVAL_MIN") or 1)
 SEARCH_INTERVAL_MAX = float(os.getenv("SEARCH_INTERVAL_MAX") or 168)
 

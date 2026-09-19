@@ -26,6 +26,15 @@ class VacancyService:
         self.analyzer = Analyzer()
         set_usage_hook(db.add_llm_usage)
         self.registry = RegistryChecker(db)
+        self._locks: dict[int, asyncio.Lock] = {}
+
+    def is_searching(self, user_id: int) -> bool:
+        lock = self._locks.get(user_id)
+        return lock is not None and lock.locked()
+
+    async def search_lock(self, user_id: int) -> asyncio.Lock:
+        lock = self._locks.setdefault(user_id, asyncio.Lock())
+        return lock
 
     # ============ Пайплайн поиска ============
 
@@ -147,6 +156,8 @@ class VacancyService:
                 elif silent:
                     sent += 1
             else:
+                rec["below_threshold"] = 1
+                await self.db.upsert_vacancy(rec)
                 await self.db.mark_seen(user_id, vid, "seen")
 
         if top_n is not None and collected:
@@ -162,7 +173,10 @@ class VacancyService:
                         deferred, spent_total, config.SCORE_TOKEN_BUDGET_PER_DAY,
                         max(0, int(budget)))
         return {"found": len(fetched), "new": new_cnt, "scored": scored, "sent": sent,
-                "deferred": deferred, "tokens": spent_total}
+                "deferred": deferred, "tokens": spent_total,
+                "threshold": threshold,
+                "already_seen": len(fetched) - new_cnt,
+                "budget_day_free": max(0, config.SCORE_TOKEN_BUDGET_PER_DAY - day_used)}
 
     # ============ Сборка записи о вакансии ============
 
@@ -299,6 +313,8 @@ class VacancyService:
             if user.get("notifications_enabled", 1):
                 await self._send_vacancy(user_id, rec, note="↩ найдена при перепроверке")
             return "sent"
+        rec["below_threshold"] = 1
+        await self.db.upsert_vacancy(rec)
         await self.db.mark_seen(user_id, vacancy_id, "seen")
         return "done"
 
